@@ -1,0 +1,29 @@
+name: Deploy Aigentss Pulse
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Hostinger VPS
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            cd ~/MonitorVPS
+            git pull origin main
+            pip3 install -r requirements.txt
+            export EMAIL_PASS='${{ secrets.EMAIL_PASS }}'
+            # Restart service (assuming systemd service is named 'vps_monitor')
+            sudo systemctl restart vps_monitor
+            echo "Deployment successful."
