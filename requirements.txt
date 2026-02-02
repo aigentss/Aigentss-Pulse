@@ -1,9 +1,6 @@
 streamlit
 pandas
+cryptography
 matplotlib
-plotly
-schedule
-cryptography>=41.0.0
-pyOpenSSL
-psutil
 requests
+psutil

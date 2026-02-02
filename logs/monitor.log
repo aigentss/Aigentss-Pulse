@@ -1411,3 +1411,33 @@
 2026-02-01 23:16:39,607 - INFO - 9rounds (217.76.58.149): UP [Stealth Mode], Latency: 259.51ms
 2026-02-01 23:16:39,608 - INFO - Quitomotors (194.163.160.139): UP [Stealth Mode], Latency: 258.36ms
 2026-02-01 23:16:46,363 - WARNING - VPS-Testing (82.25.84.232): Attempt 1 failed via 9100. Retrying...
+2026-02-01 23:16:55,372 - WARNING - VPS-Testing (82.25.84.232): Attempt 2 failed via 9100. Retrying...
+2026-02-01 23:17:04,374 - WARNING - VPS-Testing (82.25.84.232): DOWN after 3 stealth attempts.
+2026-02-01 23:17:04,397 - INFO - History exported to CSV.
+2026-02-01 23:17:04,400 - INFO - Stealth Watch Complete. Cycle: 60s
+2026-02-01 23:18:04,418 - INFO - IA LOCAL (192.168.100.33): UP [Stealth Mode], Latency: 6.80ms
+2026-02-01 23:18:04,504 - INFO - Autocom (154.38.191.23): UP [Stealth Mode], Latency: 93.63ms
+2026-02-01 23:18:04,508 - INFO - 1001Talleres (147.93.179.212): UP [Stealth Mode], Latency: 97.63ms
+2026-02-01 23:18:04,509 - INFO - Hyundai (154.38.191.168): UP [Stealth Mode], Latency: 98.25ms
+2026-02-01 23:18:04,596 - INFO - Kia (62.84.187.169): UP [Stealth Mode], Latency: 186.28ms
+2026-02-01 23:18:04,598 - INFO - 9rounds (217.76.58.149): UP [Stealth Mode], Latency: 188.27ms
+2026-02-01 23:18:04,599 - INFO - Quitomotors (194.163.160.139): UP [Stealth Mode], Latency: 188.90ms
+2026-02-01 23:18:04,600 - INFO - Armacar (109.199.117.80): UP [Stealth Mode], Latency: 189.80ms
+2026-02-01 23:18:11,412 - WARNING - VPS-Testing (82.25.84.232): Attempt 1 failed via 9100. Retrying...
+2026-02-01 23:18:20,420 - WARNING - VPS-Testing (82.25.84.232): Attempt 2 failed via 9100. Retrying...
+2026-02-01 23:18:29,425 - WARNING - VPS-Testing (82.25.84.232): DOWN after 3 stealth attempts.
+2026-02-01 23:18:29,440 - INFO - History exported to CSV.
+2026-02-01 23:18:29,443 - INFO - Stealth Watch Complete. Cycle: 60s
+2026-02-01 23:19:29,481 - INFO - IA LOCAL (192.168.100.33): UP [Stealth Mode], Latency: 34.23ms
+2026-02-01 23:19:29,563 - INFO - Autocom (154.38.191.23): UP [Stealth Mode], Latency: 116.21ms
+2026-02-01 23:19:29,568 - INFO - 1001Talleres (147.93.179.212): UP [Stealth Mode], Latency: 121.81ms
+2026-02-01 23:19:29,573 - INFO - Hyundai (154.38.191.168): UP [Stealth Mode], Latency: 126.14ms
+2026-02-01 23:19:29,651 - INFO - Quitomotors (194.163.160.139): UP [Stealth Mode], Latency: 204.89ms
+2026-02-01 23:19:29,651 - INFO - 9rounds (217.76.58.149): UP [Stealth Mode], Latency: 205.29ms
+2026-02-01 23:19:29,657 - INFO - Kia (62.84.187.169): UP [Stealth Mode], Latency: 210.60ms
+2026-02-01 23:19:29,664 - INFO - Armacar (109.199.117.80): UP [Stealth Mode], Latency: 217.96ms
+2026-02-01 23:19:36,448 - WARNING - VPS-Testing (82.25.84.232): Attempt 1 failed via 9100. Retrying...
+2026-02-01 23:19:45,455 - WARNING - VPS-Testing (82.25.84.232): Attempt 2 failed via 9100. Retrying...
+2026-02-01 23:19:54,465 - WARNING - VPS-Testing (82.25.84.232): DOWN after 3 stealth attempts.
+2026-02-01 23:19:54,489 - INFO - History exported to CSV.
+2026-02-01 23:19:54,492 - INFO - Stealth Watch Complete. Cycle: 60s

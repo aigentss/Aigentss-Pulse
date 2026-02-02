@@ -72,40 +72,16 @@ def init_system():
                   disk REAL DEFAULT 0,
                   timestamp DATETIME)''')
     
-    # Schema Migration for Telemetry
-    try:
-        c.execute("ALTER TABLE status_history ADD COLUMN cpu REAL DEFAULT 0")
-        c.execute("ALTER TABLE status_history ADD COLUMN ram REAL DEFAULT 0")
-        c.execute("ALTER TABLE status_history ADD COLUMN disk REAL DEFAULT 0")
-    except:
-        pass # Columns exist
-
-    # Performance Index for Analytics
-    c.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON status_history(timestamp)")
-    # Index for IP queries (Source of Truth)
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ip ON status_history(ip)")
-    
-    # Notification Logs
-    c.execute('''CREATE TABLE IF NOT EXISTS notification_logs
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  timestamp DATETIME,
-                  recipient_email TEXT,
-                  vps_name TEXT,
-                  status TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS config
-                 (key TEXT PRIMARY KEY, value TEXT)''')
-    
-    # New Table: Dynamic VPS Targets (IP as Primary Key / Unique)
+    # Table VPS Targets with IP as Primary Key
     c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vps_targets'")
     table_exists = c.fetchone()[0]
 
     if table_exists:
-        # Check if we need to migrate to IP as PK
         try:
-            # Check for name Hyundai on Testing IP for deduplication
+            # Deduplication: Hyundai vs Testing
             c.execute("DELETE FROM vps_targets WHERE ip='82.25.84.232' AND name='Hyundai'")
             
+            # Migration to IP Primary Key
             c.execute("CREATE TABLE IF NOT EXISTS vps_targets_new (name TEXT, ip TEXT PRIMARY KEY, port INTEGER DEFAULT 9100, enabled INTEGER DEFAULT 1, notify INTEGER DEFAULT 1)")
             c.execute("INSERT OR IGNORE INTO vps_targets_new (name, ip, port, enabled, notify) SELECT name, ip, 9100, enabled, notify FROM vps_targets")
             c.execute("DROP TABLE vps_targets")
@@ -120,21 +96,30 @@ def init_system():
                       enabled INTEGER DEFAULT 1,
                       notify INTEGER DEFAULT 1)''')
 
-    # Seed Config
+    # Config & Notification Logs
+    c.execute('''CREATE TABLE IF NOT EXISTS notification_logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp DATETIME,
+                  recipient_email TEXT,
+                  vps_name TEXT,
+                  status TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)''')
+    
+    # Indices
+    c.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON status_history(timestamp)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ip ON status_history(ip)")
+    
+    # Seeds
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('check_interval', '60')")
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('global_notify', '1')")
     
-    # Seed VPS List
-    logging.info("Checking/Seeding VPS Targets...")
     for name, ip in INITIAL_VPS_LIST.items():
         c.execute("INSERT OR IGNORE INTO vps_targets (name, ip, port) VALUES (?, ?, 9100)", (name, ip))
-        # Enforce name
         c.execute("UPDATE vps_targets SET name=? WHERE ip=?", (name, ip))
             
     conn.commit()
     conn.close()
 
-    # Exports Directory
     if not os.path.exists(EXPORT_DIR):
         os.makedirs(EXPORT_DIR)
 
@@ -146,19 +131,14 @@ def get_config_val(key, default=None):
         result = c.fetchone()
         conn.close()
         return result[0] if result else default
-    except Exception as e:
-        logging.error(f"Error reading config {key}: {e}")
+    except:
         return default
 
 def get_decrypted_config(key):
     val = get_config_val(key)
-    if not val:
-        return None
-    try:
-        return CIPHER_SUITE.decrypt(val.encode()).decode()
-    except Exception as e:
-        logging.error(f"Decryption failed for {key}: {e}")
-        return None
+    if not val: return None
+    try: return CIPHER_SUITE.decrypt(val.encode()).decode()
+    except: return None
 
 def get_active_targets():
     try:
@@ -168,258 +148,121 @@ def get_active_targets():
         targets = c.fetchall()
         conn.close()
         return targets
-    except Exception as e:
-        logging.error(f"Error reading targets: {e}")
-        return []
-
-def log_notification(email, vps_name, status):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("INSERT INTO notification_logs (timestamp, recipient_email, vps_name, status) VALUES (?, ?, ?, ?)",
-                  (datetime.now(), email, vps_name, status))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"Failed to log notification: {e}")
+    except: return []
 
 def create_latency_graph(ip):
-    """Generates a PNG graph of the last 24h latency for a given IP."""
+    """PNG 24h graph."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cutoff = datetime.now() - timedelta(hours=24)
         df = pd.read_sql_query("SELECT timestamp, latency FROM status_history WHERE ip=? AND timestamp >= ? ORDER BY timestamp ASC", 
                                conn, params=(ip, cutoff))
         conn.close()
-        
-        if df.empty:
-            return None
-        
+        if df.empty: return None
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
         plt.figure(figsize=(8, 4))
         plt.plot(df['timestamp'], df['latency'], color='#ff0000', linewidth=2)
         plt.title(f"Latency Trend (Last 24h) - {ip}", color='white')
-        plt.xlabel("Time", color='white')
-        plt.ylabel("Latency (ms)", color='white')
-        plt.grid(True, linestyle='--', alpha=0.3)
         plt.gca().set_facecolor('#1e1e1e')
         plt.gcf().set_facecolor('#1e1e1e')
         plt.tick_params(colors='white')
-        
         img_data = io.BytesIO()
         plt.savefig(img_data, format='png', bbox_inches='tight', facecolor='#1e1e1e')
         plt.close()
         img_data.seek(0)
         return img_data.read()
     except Exception as e:
-        logging.error(f"Failed to generate graph for {ip}: {e}")
+        logging.error(f"Graph error: {e}")
         return None
 
 def send_alert_worker(vps_name, vps_ip, error_msg):
-    """Elite Async Alert with Graph, Vitals and Last Heartbeat."""
+    """Elite Async Alert."""
     email_user = get_config_val('email_user')
     email_pass = get_decrypted_config('email_pass')
+    if not email_user or not email_pass: return
 
-    if not email_user or not email_pass or email_user.strip() == "" or email_pass.strip() == "":
-        return
-
-    # Fetch Intelligence (Last Heartbeat & Vitals)
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("""SELECT cpu, ram, disk, timestamp FROM status_history 
-                 WHERE ip=? AND status=1 ORDER BY timestamp DESC LIMIT 1""", (vps_ip,))
+    c.execute("SELECT cpu, ram, disk, timestamp FROM status_history WHERE ip=? AND status=1 ORDER BY timestamp DESC LIMIT 1", (vps_ip,))
     last_up = c.fetchone()
     conn.close()
 
-    vitals_str = "Unknown"
-    heartbeat_str = "No record found"
-    
-    if last_up:
-        cpu, ram, disk, ts = last_up
-        vitals_str = f"CPU: {cpu:.1f}% | RAM: {ram:.1f}% | DISK: {disk:.1f}%"
-        heartbeat_str = ts
+    vitals = f"CPU: {last_up[0]:.0f}% | RAM: {last_up[1]:.0f}% | DISK: {last_up[2]:.0f}%" if last_up else "Unknown"
+    ts = last_up[3] if last_up else "None"
 
-    # Create Message
     msg = MIMEMultipart()
     msg['Subject'] = f"🚨 ALERT: {vps_name} is DOWN"
     msg['From'] = email_user
     msg['To'] = email_user
+    body = f"""
+🐒 Aigentss Pulse | Intelligence Report
+SERVER: {vps_name} ({vps_ip})
+STATUS: 🔴 DOWN (Port 9100 Stealth)
 
-    body_text = f"""
-🐒 Aigentss Pulse | Stealth Intelligence Report
-
-SERVER: {vps_name}
-IP ADDRESS: {vps_ip}
-STATUS: 🔴 DOWN (Unreachable via Stealth Port 9100)
+LAST HEARTBEAT (TS): {ts}
+LAST VITALS: {vitals}
 ERROR: {error_msg}
 
---- INTEL REPORT ---
-LAST HEARTBEAT (TS): {heartbeat_str}
-LAST KNOWN VITALS:
-- {vitals_str}
-
-A latency trend graph for the last 24 hours is attached to this report.
+24h trend graph attached.
 """
-    msg.attach(MIMEText(body_text, 'plain'))
-
-    # Attach Graph
-    graph_data = create_latency_graph(vps_ip)
-    if graph_data:
-        image = MIMEImage(graph_data)
-        image.add_header('Content-ID', '<trend_graph>')
-        image.add_header('Content-Disposition', 'attachment', filename='latency_trend.png')
-        msg.attach(image)
+    msg.attach(MIMEText(body, 'plain'))
+    graph = create_latency_graph(vps_ip)
+    if graph: msg.attach(MIMEImage(graph, name="trend.png"))
 
     try:
-        smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-        server = smtplib.SMTP(smtp_host, 587, timeout=15)
-        server.starttls()
-        server.login(email_user, email_pass)
-        server.sendmail(email_user, email_user, msg.as_string())
-        server.quit()
-        logging.info(f"Elite Alert sent for {vps_name}")
-        log_notification(email_user, vps_name, "Sent (Elite)")
+        s = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
+        s.starttls()
+        s.login(email_user, email_pass)
+        s.sendmail(email_user, email_user, msg.as_string())
+        s.quit()
+        logging.info(f"Elite alert sent: {vps_name}")
     except Exception as e:
-        logging.error(f"Failed to send email for {vps_name}: {e}")
-        log_notification(email_user, vps_name, f"Failed: {str(e)}")
+        logging.error(f"Alert failed: {e}")
 
-def send_alert(vps_name, vps_ip, error_msg):
-    threading.Thread(target=send_alert_worker, args=(vps_name, vps_ip, error_msg), daemon=True).start()
+def send_alert(name, ip, msg):
+    threading.Thread(target=send_alert_worker, args=(name, ip, msg), daemon=True).start()
 
 def should_send_alert(ip, target_notify):
-    global_notify = int(get_config_val('global_notify', 1))
-    if global_notify == 0 or target_notify == 0:
-        return False
-
+    if int(get_config_val('global_notify', 1)) == 0 or target_notify == 0: return False
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT status FROM status_history WHERE ip=? ORDER BY timestamp DESC LIMIT 1", (ip,))
-    result = c.fetchone()
+    res = c.fetchone()
     conn.close()
-    
-    if result is None or result[0] == 1:
-        return True
-    return False
+    return True if res is None or res[0] == 1 else False
 
-def check_vps(name, ip, port, notify_flag):
-    max_retries = 3
-    check_port = 9100 
-    
-    for attempt in range(1, max_retries + 1):
-        status = 0
-        latency = 0.0
-        error_msg = ""
-        cpu, ram, disk = 0, 0, 0
+def check_vps(name, ip, notify_flag):
+    # Port 9100 Bypass
+    port = 9100
+    try:
+        start = time.time()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(7.0)
+        s.connect((ip, port)); s.close()
+        latency = (time.time() - start) * 1000
+        vit = prometheus_metrics.get_node_metrics(ip)
+        log_to_db(name, ip, 1, latency, vit['cpu'], vit['ram'], vit['disk'])
+        logging.info(f"{name} ({ip}): UP [Bypass]")
+    except Exception as e:
+        if should_send_alert(ip, notify_flag): send_alert(name, ip, str(e))
+        log_to_db(name, ip, 0, 0, 0, 0, 0)
+        logging.warning(f"{name} ({ip}): DOWN")
 
-        try:
-            start_time = time.time()
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(7.0)
-            sock.connect((ip, check_port))
-            sock.close()
-            
-            latency = (time.time() - start_time) * 1000
-            status = 1
-            logging.info(f"{name} ({ip}): UP [Stealth Mode], Latency: {latency:.2f}ms")
-            
-            # Fetch telemetry
-            vitals = prometheus_metrics.get_node_metrics(ip)
-            cpu, ram, disk = vitals['cpu'], vitals['ram'], vitals['disk']
-            
-            log_to_db(name, ip, status, latency, cpu, ram, disk)
-            return
-                
-        except Exception as e:
-            error_msg = str(e)
-            
-        if attempt < max_retries:
-            logging.warning(f"{name} ({ip}): Attempt {attempt} failed via 9100. Retrying...")
-            time.sleep(2)
-        else:
-            logging.warning(f"{name} ({ip}): DOWN after {max_retries} stealth attempts.")
-            if should_send_alert(ip, notify_flag):
-                send_alert(name, ip, error_msg)
-            log_to_db(name, ip, status, 0, 0, 0, 0)
-
-def log_to_db(name, ip, status, latency, cpu, ram, disk):
-    if latency < 0 or latency > 30000:
-        return
-
+def log_to_db(name, ip, status, lat, cpu, ram, disk):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("INSERT INTO status_history (name, ip, status, latency, cpu, ram, disk, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-              (name, ip, status, latency, cpu, ram, disk, datetime.now()))
-    conn.commit()
-    conn.close()
-
-def generate_status_page():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        query = "SELECT sh.name, sh.status, MAX(sh.timestamp) FROM status_history sh GROUP BY sh.ip"
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-        
-        html = f"""
-        <html><head><style>body{{font-family:sans-serif;background:#1e1e1e;color:#fff;padding:20px;}}
-        .card{{background:#333;padding:15px;margin:10px 0;border-radius:5px;display:flex;justify-content:space-between;}}
-        .online{{color:#0f0;}} .offline{{color:#f00;}}</style></head>
-        <body><h1>Aigentss Pulse | Stealth Intelligence</h1>
-        """
-        for _, row in df.iterrows():
-            st_text = "Modo Bypass" if row['status'] == 1 else "OFFLINE"
-            st_class = "online" if row['status'] == 1 else "offline"
-            html += f'<div class="card"><span>{row["name"]}</span><span class="{st_class}">{st_text}</span></div>'
-        
-        html += f"<p>Updated: {datetime.now()}</p></body></html>"
-        with open(os.path.join(EXPORT_DIR, "status.html"), "w") as f:
-            f.write(html)
-    except Exception as e:
-        logging.error(f"Status Page Gen Failed: {e}")
-
-def save_to_csv():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        df = pd.read_sql_query("SELECT * FROM status_history ORDER BY timestamp DESC", conn)
-        conn.close()
-        df.to_csv(os.path.join(EXPORT_DIR, "pulse_history.csv"), index=False)
-        logging.info("History exported to CSV.")
-    except Exception as e:
-        logging.error(f"CSV Export failed: {e}")
-
-def purge_old_data():
-    try:
-        cutoff = datetime.now() - timedelta(days=30)
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("DELETE FROM status_history WHERE timestamp < ?", (cutoff,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"Purge failed: {e}")
+              (name, ip, status, lat, cpu, ram, disk, datetime.now()))
+    conn.commit(); conn.close()
 
 def master_loop():
-    """Elite Unified Master Loop"""
+    init_system()
     while True:
         targets = get_active_targets()
-        threads = []
-        for name, ip, port, notify in targets:
-            t = threading.Thread(target=check_vps, args=(name, ip, port, notify))
-            threads.append(t)
-            t.start()
-        
-        for t in threads:
-            t.join()
-            
-        save_to_csv()
-        generate_status_page()
-        purge_old_data()
-        
+        threads = [threading.Thread(target=check_vps, args=(t[0], t[1], t[3])) for t in targets]
+        for t in threads: t.start()
+        for t in threads: t.join()
         interval = int(get_config_val('check_interval', 60))
-        logging.info(f"Stealth Watch Complete. Cycle: {interval}s")
         time.sleep(interval)
 
 if __name__ == "__main__":
-    init_system()
-    logging.info("Aigentss Pulse | Stealth Intelligence Active")
     master_loop()
