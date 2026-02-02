@@ -8,6 +8,7 @@ import logging
 import pandas as pd
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
+from cryptography.fernet import Fernet
 
 # Fix for Python 3.12+ sqlite3 datetime deprecation
 def adapt_datetime(val):
@@ -21,9 +22,7 @@ sqlite3.register_converter("timestamp", convert_datetime)
 
 # Configuration
 DB_NAME = "aigentss_pulse.db"
-DEFAULT_INTERVAL = 60
-EMAIL_SENDER = "angel.yaguana@aigentss.com"
-EMAIL_PASS = os.getenv('EMAIL_PASS')
+KEY_FILE = "secret.key"
 EXPORT_DIR = "exports"
 
 # Initial Seed List (Migrated to DB on first run)
@@ -39,6 +38,18 @@ INITIAL_VPS_LIST = {
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def load_or_create_key():
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE, "rb") as key_file:
+            return key_file.read()
+    else:
+        key = Fernet.generate_key()
+        with open(KEY_FILE, "wb") as key_file:
+            key_file.write(key)
+        return key
+
+CIPHER_SUITE = Fernet(load_or_create_key())
+
 def init_system():
     # Database Setup
     conn = sqlite3.connect(DB_NAME)
@@ -50,6 +61,9 @@ def init_system():
                   status INTEGER,
                   latency REAL,
                   timestamp DATETIME)''')
+    
+    # Performance Index for Analytics
+    c.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON status_history(timestamp)")
     
     c.execute('''CREATE TABLE IF NOT EXISTS config
                  (key TEXT PRIMARY KEY, value TEXT)''')
@@ -70,7 +84,7 @@ def init_system():
         pass # Column likely exists
     
     # Seed Config
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('check_interval', ?)", (str(DEFAULT_INTERVAL),))
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('check_interval', '60')")
     c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('global_notify', '1')")
     
     # Seed VPS List if empty
@@ -87,17 +101,27 @@ def init_system():
     if not os.path.exists(EXPORT_DIR):
         os.makedirs(EXPORT_DIR)
 
-def get_config_int(key, default):
+def get_config_val(key, default=None):
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute("SELECT value FROM config WHERE key=?", (key,))
         result = c.fetchone()
         conn.close()
-        return int(result[0]) if result else default
+        return result[0] if result else default
     except Exception as e:
         logging.error(f"Error reading config {key}: {e}")
         return default
+
+def get_decrypted_config(key):
+    val = get_config_val(key)
+    if not val:
+        return None
+    try:
+        return CIPHER_SUITE.decrypt(val.encode()).decode()
+    except Exception as e:
+        logging.error(f"Decryption failed for {key}: {e}")
+        return None
 
 def get_active_targets():
     try:
@@ -112,25 +136,32 @@ def get_active_targets():
         return []
 
 def send_alert(vps_name, vps_ip, error_msg):
-    if not EMAIL_PASS:
-        # logging.warning("EMAIL_PASS environment variable not set. Skipping email alert.") 
-        # Commented out to reduce noise in logs if intentionally unset
-        return
+    # Retrieve secure credentials
+    email_user = get_config_val('email_user')
+    email_pass = get_decrypted_config('email_pass')
+
+    if not email_user or not email_pass:
+        # Fallback to env var if DB config missing (migration support)
+        email_user = "angel.yaguana@aigentss.com"
+        email_pass = os.getenv('EMAIL_PASS')
+        if not email_pass:
+            logging.warning("No email credentials found (DB or ENV). Skipping alert.")
+            return
 
     subject = f"ALERT: VPS {vps_name} is DOWN"
     body = f"Aigentss Pulse Alert\n\nThe VPS {vps_name} ({vps_ip}) is unreachable or failed protocol check.\n\nError: {error_msg}\n\nTime: {datetime.now()}"
     
     msg = MIMEText(body)
     msg['Subject'] = subject
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_SENDER
+    msg['From'] = email_user
+    msg['To'] = email_user
 
     try:
         smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
         server = smtplib.SMTP(smtp_host, 587)
         server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASS)
-        server.sendmail(EMAIL_SENDER, EMAIL_SENDER, msg.as_string())
+        server.login(email_user, email_pass)
+        server.sendmail(email_user, email_user, msg.as_string())
         server.quit()
         logging.info(f"Alert sent for {vps_name}")
     except Exception as e:
@@ -138,7 +169,7 @@ def send_alert(vps_name, vps_ip, error_msg):
 
 def should_send_alert(name, target_notify):
     # Check Global Switch
-    global_notify = get_config_int('global_notify', 1)
+    global_notify = int(get_config_val('global_notify', 1))
     if global_notify == 0:
         return False
     
@@ -248,14 +279,11 @@ def monitor_loop():
             
         save_to_csv()
         purge_old_data()
-            
-        interval = get_check_interval()
+        
+        # Dynamic Interval Check
+        interval = int(get_config_val('check_interval', 60))
         logging.info(f"Sleeping for {interval} seconds...")
         time.sleep(interval)
-
-# Helper for interval (re-added inside to avoid undefined error if moved)
-def get_check_interval():
-    return get_config_int('check_interval', 60)
 
 if __name__ == "__main__":
     init_system()

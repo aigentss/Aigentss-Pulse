@@ -22,7 +22,7 @@ jobs:
           script: |
             cd ~/MonitorVPS
             git pull origin main
-            pip3 install -r requirements.txt
+            pip3 install -r requirements.txt --break-system-packages
             export EMAIL_PASS='${{ secrets.EMAIL_PASS }}'
             # Restart service (assuming systemd service is named 'vps_monitor')
             sudo systemctl restart vps_monitor

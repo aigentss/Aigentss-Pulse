@@ -5,3 +5,5 @@ venv/
 .DS_Store
 *.db
 exports/
+secret.key
+
