@@ -17,15 +17,8 @@ KEY_FILE = "secret.key"
 st.set_page_config(page_title="Aigentss Pulse | Infrastructure Core", layout="wide", page_icon="📡")
 
 # --- BACKGROUND MONITOR THREAD ---
-if "monitor_started" not in st.session_state:
-    # Start monitor in a dedicated background thread if not already running in this process
-    # Note: Streamlit Cloud might restart the script, so we use a singleton-like check
-    def run_monitor():
-        monitor.master_loop()
-    
-    thread = threading.Thread(target=run_monitor, daemon=True)
-    thread.start()
-    st.session_state.monitor_started = True
+# Unified architecture: monitor starts automatically on first import or manual trigger
+monitor.start_monitor_thread()
 
 # --- CSS & THEME ---
 st.markdown("""

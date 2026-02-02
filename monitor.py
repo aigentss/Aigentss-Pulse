@@ -254,6 +254,21 @@ def log_to_db(name, ip, status, lat, cpu, ram, disk):
               (name, ip, status, lat, cpu, ram, disk, datetime.now()))
     conn.commit(); conn.close()
 
+# --- THREAD MANAGEMENT ---
+_monitor_thread = None
+_monitor_lock = threading.Lock()
+
+def start_monitor_thread():
+    """Thread-safe singleton starter for the monitor loop."""
+    global _monitor_thread
+    with _monitor_lock:
+        if _monitor_thread is None or not _monitor_thread.is_alive():
+            _monitor_thread = threading.Thread(target=master_loop, daemon=True)
+            _monitor_thread.start()
+            logging.info("Background monitor thread spawned.")
+        else:
+            logging.debug("Monitor thread already active.")
+
 def master_loop():
     init_system()
     while True:
