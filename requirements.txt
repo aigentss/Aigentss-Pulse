@@ -3,4 +3,7 @@ pandas
 matplotlib
 plotly
 schedule
-cryptography
+cryptography>=41.0.0
+pyOpenSSL
+psutil
+requests

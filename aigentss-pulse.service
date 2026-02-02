@@ -1,0 +1,29 @@
+[Unit]
+Description=Aigentss Pulse - Infrastructure Monitoring System
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/MonitorVPS
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/python3 /root/MonitorVPS/launcher.py
+Restart=always
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+Nice=-5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aigentss-pulse
+
+# Security (optional hardening)
+# PrivateTmp=yes
+# NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -81,10 +81,17 @@ def get_db_connection():
 def get_latest_status():
     try:
         conn = get_db_connection()
+        # Enhanced query for latest status by IP (Core Truth)
         query = """
-        SELECT name, ip, status, latency, MAX(timestamp) as last_check
-        FROM status_history
-        GROUP BY name
+        SELECT sh.* 
+        FROM status_history sh
+        INNER JOIN (
+            SELECT ip, MAX(timestamp) as MaxTime
+            FROM status_history
+            GROUP BY ip
+        ) groupedsh 
+        ON sh.ip = groupedsh.ip 
+        AND sh.timestamp = groupedsh.MaxTime
         """
         df = pd.read_sql_query(query, conn)
         conn.close()
@@ -113,22 +120,17 @@ def set_config_value(key, val):
 def get_targets():
     try:
         conn = get_db_connection()
-        # Ensure backwards compatibility if port column missing (handled in monitor.py migration)
-        try:
-            df = pd.read_sql_query("SELECT id, name, ip, port, enabled, notify FROM vps_targets", conn)
-        except:
-             df = pd.read_sql_query("SELECT id, name, ip, enabled, notify FROM vps_targets", conn)
-             df['port'] = 22 # Default for display if old schema used app before restart
+        df = pd.read_sql_query("SELECT rowid as id, name, ip, port, enabled, notify FROM vps_targets", conn)
         conn.close()
         return df
     except:
         return pd.DataFrame(columns=['id', 'name', 'ip', 'port', 'enabled', 'notify'])
 
-def add_target(name, ip, port=22):
+def add_target(name, ip, port=9100):
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO vps_targets (name, ip, port) VALUES (?, ?, ?)", (name, ip, int(port)))
+        c.execute("INSERT OR REPLACE INTO vps_targets (name, ip, port) VALUES (?, ?, ?)", (name, ip, int(port)))
         conn.commit()
         conn.close()
         return True
@@ -136,34 +138,41 @@ def add_target(name, ip, port=22):
         st.error(f"Error adding target: {e}")
         return False
 
-def update_target(id, enabled, notify):
+def update_target(ip, enabled, notify):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE vps_targets SET enabled=?, notify=? WHERE id=?", (1 if enabled else 0, 1 if notify else 0, id))
+    c.execute("UPDATE vps_targets SET enabled=?, notify=? WHERE ip=?", (1 if enabled else 0, 1 if notify else 0, ip))
     conn.commit()
     conn.close()
 
-def delete_target(id):
+def delete_target(ip):
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM vps_targets WHERE id=?", (id,))
+    c.execute("DELETE FROM vps_targets WHERE ip=?", (ip,))
     conn.commit()
     conn.close()
+
+def purge_database():
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM status_history")
+        c.execute("DELETE FROM notification_logs")
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Purge failed: {e}")
+        return False
 
 def get_history_data(start_time=None, end_time=None):
     try:
         conn = get_db_connection()
-        
         if not start_time:
-            start_time = datetime.now() - timedelta(hours=24)
-        
-        # Optimization: Limit points if range is huge (simple sampling via SQLite not easy without window functions, 
-        # but 7 days at 1m interval is ~10k points per server, manageable for Streamlit charts usually)
-        # Using basic select for now, index on timestamp helps speed.
+            start_time = datetime.now() - timedelta(hours=3)
         
         query = "SELECT name, latency, timestamp FROM status_history WHERE timestamp >= ?"
         params = [start_time]
-        
         if end_time:
             query += " AND timestamp <= ?"
             params.append(end_time)
@@ -177,7 +186,6 @@ def get_history_data(start_time=None, end_time=None):
         return pd.DataFrame()
 
 def check_monitor_health():
-    """Auto-healing: Checks if data is stale and restarts monitor if needed."""
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -188,227 +196,216 @@ def check_monitor_health():
         if last_check:
             last_time = datetime.fromisoformat(last_check)
             gap = (datetime.now() - last_time).total_seconds()
-            
-            # If gap > 2 mins (assuming 60s interval standard, allowing slight delay)
             if gap > 120:
                 st.toast("⚠️ Monitor heartbeat lost. Attempting restart...", icon="🚑")
-                try:
-                    subprocess.Popen(["python3", "monitor.py"])
-                    time.sleep(2) # Give it moment to spawn
-                    st.toast("✅ Monitor restarted.", icon="🚀")
-                    return False
-                except Exception as e:
-                    st.error(f"Failed to auto-start monitor: {e}")
-                    return False
+                subprocess.Popen(["python3", "monitor.py"])
+                return False
         return True
     except:
-        return True # DB empty or error, assume initializing
+        return True
 
-# Sidebar Styling
+# Sidebar Logic
 try:
-    st.sidebar.image(LOGO_FILE, use_container_width=True)
+    st.sidebar.image(LOGO_FILE, width='stretch')
 except:
-    st.sidebar.image(LOGO_URL, use_container_width=True)
+    st.sidebar.image(LOGO_URL, width='stretch')
 
-st.sidebar.markdown("<h3 style='text-align: center; color: #FAFAFA;'>Aigentss Pulse</h3>", unsafe_allow_html=True)
+st.sidebar.markdown("<h3 style='text-align: center; color: #FAFAFA;'>Aigentss Pulse Evolution</h3>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
 st.sidebar.header("Settings")
 
-# Interval Setting
 current_interval = int(get_config_value('check_interval', 60))
 new_interval = st.sidebar.slider("Check Interval (seconds)", min_value=10, max_value=300, value=current_interval)
 if new_interval != current_interval:
     set_config_value('check_interval', new_interval)
-    st.sidebar.success(f"Optimizing engine to {new_interval}s...")
-    time.sleep(0.5)
     st.rerun()
 
-# Run Health Check
 check_monitor_health()
 
-# Main Title
-st.title("Aigentss Pulse | Infrastructure Core")
+st.title("Aigentss Pulse | Infrastructure Core Evolution")
 
-# Tabs
 tab1, tab2 = st.tabs(["📡 Live Dashboard", "⚙️ Configuration"])
 
+if 'current_view_ip' not in st.session_state:
+    st.session_state.current_view_ip = None
+if 'current_view_name' not in st.session_state:
+    st.session_state.current_view_name = None
+
 with tab1:
-    # Live Status
-    st.subheader("Live Status")
-    df_status = get_latest_status()
-    
-    if not df_status.empty:
-        cols = st.columns(4)
-        for index, row in df_status.iterrows():
-            col_idx = index % 4
-            if index > 0 and index % 4 == 0:
-                cols = st.columns(4)
-            
-            with cols[col_idx]:
-                if row['status'] == 1:
-                    if row['latency'] > 500:
-                        status_class = "warning"
-                        dot_color = "#FFA500"
-                        card_class = "card-warning"
-                    else:
-                        status_class = "online"
-                        dot_color = "#00ff00"
-                        card_class = "card-online"
-                else:
-                    status_class = "offline"
-                    dot_color = "#ff0000"
-                    card_class = "card-offline"
-                
-                st.markdown(f"""
-                <div class="metric-card {card_class}">
-                    <div style="font-size: 1.2em; font-weight: bold; margin-bottom: 5px;">
-                        <span class="status-dot" style="background-color: {dot_color};"></span>
-                        {row['name']}
-                    </div>
-                    <div style="color: #888; font-size: 0.9em; margin-bottom: 15px;">{row['ip']}</div>
-                    <div style="font-size: 2em; font-weight: bold; margin-bottom: 5px;">
-                        {row['latency']:.1f} ms
-                    </div>
-                    <div style="font-size: 0.8em; color: #666;">
-                        Last check: {row['last_check']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-    else:
-        st.warning("No data received yet. Initializing Pulse Core...")
-
-    # Analytics & Filters
-    st.markdown("---")
-    st.subheader("📈 Historical Analytics")
-    
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        time_range = st.select_slider(
-            "Time Range",
-            options=["10m", "30m", "1h", "6h", "12h", "24h", "48h", "7d", "Custom"],
-            value="24h"
-        )
-    
-    start_time = None
-    end_time = None
-    
-    if time_range == "Custom":
-        with c2:
-            date_range = st.date_input("Select Date Range", [])
-            if len(date_range) == 2:
-                start_time = datetime.combine(date_range[0], datetime.min.time())
-                end_time = datetime.combine(date_range[1], datetime.max.time())
-    else:
-        now = datetime.now()
-        mapping = {
-            "10m": timedelta(minutes=10), "30m": timedelta(minutes=30),
-            "1h": timedelta(hours=1), "6h": timedelta(hours=6),
-            "12h": timedelta(hours=12), "24h": timedelta(hours=24),
-            "48h": timedelta(hours=48), "7d": timedelta(days=7)
-        }
-        start_time = now - mapping.get(time_range, timedelta(hours=24))
-
-    if start_time:
-        df_history = get_history_data(start_time, end_time)
-        if not df_history.empty:
-            st.line_chart(df_history, x="timestamp", y="latency", color="name")
-        else:
-            st.info("No data available for the selected range.")
+    if st.session_state.current_view_ip:
+        ip = st.session_state.current_view_ip
+        name = st.session_state.current_view_name
         
-    if st.button("Refresh Dashboard"):
-        st.rerun()
+        st.button("← Back to Overview", on_click=lambda: st.session_state.update(current_view_ip=None))
+        st.subheader(f"🔍 Drill-Down: {name} ({ip})")
+        
+        # PRO Time Range Selector (Integrated into Detail)
+        time_options = ["10m", "30m", "1h", "6h", "12h", "24h", "48h", "72h", "7d"]
+        sel_range = st.select_slider("Select Filter Range", options=time_options, value="6h", key="detail_range")
+        
+        map_delta = {
+            "10m": timedelta(minutes=10), "30m": timedelta(minutes=30), "1h": timedelta(hours=1),
+            "6h": timedelta(hours=6), "12h": timedelta(hours=12), "24h": timedelta(hours=24),
+            "48h": timedelta(hours=48), "72h": timedelta(hours=72), "7d": timedelta(days=7)
+        }
+        
+        st_time = datetime.now() - map_delta[sel_range]
+        conn = get_db_connection()
+        df_detail = pd.read_sql_query("SELECT * FROM status_history WHERE ip=? AND timestamp >= ? ORDER BY timestamp ASC", conn, params=(ip, st_time))
+        conn.close()
+        
+        if not df_detail.empty:
+            df_detail['timestamp'] = pd.to_datetime(df_detail['timestamp'])
+            latest = df_detail.iloc[-1]
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Latency", f"{latest['latency']:.1f} ms")
+            c2.metric("CPU", f"{latest['cpu']:.1f}%")
+            c3.metric("RAM", f"{latest['ram']:.1f}%")
+            c4.metric("Disk", f"{latest['disk']:.1f}%")
+            
+            st.markdown("### 📡 Latency History")
+            st.line_chart(df_detail, x='timestamp', y='latency')
+            st.markdown("### 💻 CPU & RAM Utilization")
+            st.area_chart(df_detail, x='timestamp', y=['cpu', 'ram'])
+        else:
+            st.info("No historical data for this window.")
+            
+    else:
+        st.subheader("Live Status [Modo Bypass]")
+        df_status = get_latest_status()
+
+        if not df_status.empty:
+            cols = st.columns(4)
+            for index, row in df_status.iterrows():
+                col_idx = index % 4
+                if index > 0 and index % 4 == 0:
+                    cols = st.columns(4)
+                
+                with cols[col_idx]:
+                    dot_color = "#00ff00" if row['status'] == 1 else "#ff0000"
+                    card_class = "card-online" if row['status'] == 1 else "card-offline"
+                    
+                    st.markdown(f"""
+                    <div class="metric-card {card_class}">
+                        <div style="font-size: 1.1em; font-weight: bold; margin-bottom: 5px;">
+                            <span class="status-dot" style="background-color: {dot_color};"></span>
+                            {row['name']}
+                        </div>
+                        <div style="color: #888; font-size: 0.8em; margin-bottom: 5px;">{row['ip']}</div>
+                        <div style="font-size: 1.8em; font-weight: bold; margin-bottom: 5px;">
+                            {row['latency']:.1f} ms
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Triple Telemetry Bars
+                    cpu, ram, disk = row.get('cpu', 0), row.get('ram', 0), row.get('disk', 0)
+                    tc1, tc2, tc3 = st.columns(3)
+                    with tc1:
+                        st.caption(f"CPU: {cpu:.0f}%")
+                        st.progress(min(int(cpu), 100)/100)
+                    with tc2:
+                        st.caption(f"RAM: {ram:.0f}%")
+                        st.progress(min(int(ram), 100)/100)
+                    with tc3:
+                        st.caption(f"DISK: {disk:.0f}%")
+                        st.progress(min(int(disk), 100)/100)
+                    
+                    if st.button("🔍 Details", key=f"d_{row['ip']}"):
+                        st.session_state.current_view_ip = row['ip']
+                        st.session_state.current_view_name = row['name']
+                        st.rerun()
+        else:
+            st.warning("Pulse engine idle. Waiting for first check...")
+
+    st.markdown("---")
+    st.subheader("📊 Global Analytics Selector")
+    
+    ca1, ca2 = st.columns([3, 1])
+    with ca1:
+        range_pro = st.select_slider("Historical Range", options=["10m", "30m", "1h", "6h", "12h", "24h", "48h", "72h", "7d", "Calendar Audit"], value="1h")
+    
+    start_filter = None
+    if range_pro == "Calendar Audit":
+        with ca2:
+            audit_date = st.date_input("Select Audit Date", datetime.now())
+            start_filter = datetime.combine(audit_date, datetime.min.time())
+            end_filter = datetime.combine(audit_date, datetime.max.time())
+    else:
+        map_delta = {
+            "10m": timedelta(minutes=10), "30m": timedelta(minutes=30), "1h": timedelta(hours=1),
+            "6h": timedelta(hours=6), "12h": timedelta(hours=12), "24h": timedelta(hours=24),
+            "48h": timedelta(hours=48), "72h": timedelta(hours=72), "7d": timedelta(days=7)
+        }
+        start_filter = datetime.now() - map_delta[range_pro]
+        end_filter = None
+
+    df_hist = get_history_data(start_filter, end_filter)
+    if not df_hist.empty:
+        st.line_chart(df_hist, x="timestamp", y="latency", color="name")
+    else:
+        st.info("No data found for selected criteria.")
 
 with tab2:
-    st.header("System Configuration")
+    st.header("Nucleus Configuration")
     
-    # Secure SMTP Settings
-    st.subheader("🔐 Security Layer (SMTP)")
-    with st.expander("Configure Email Credentials"):
-        smtp_user = st.text_input("Monitoring Email (Gmail)", value=get_config_value("email_user", ""))
-        smtp_pass = st.text_input("App Password", type="password")
-        
-        if st.button("Save Credentials"):
-            if smtp_user and smtp_pass:
-                set_config_value("email_user", smtp_user)
-                encrypted = encrypt_val(smtp_pass)
-                if encrypted:
-                    set_config_value("email_pass", encrypted)
-                    st.success("Credentials secured and encrypted.")
-            else:
-                st.error("Please provide both email and password.")
-
+    with st.expander("🔐 SMTP Security Gateway"):
+        s_user = st.text_input("Alert Email", value=get_config_value("email_user", ""))
+        s_pass = st.text_input("Contraseña de Correo", type="password")
+        if st.button("Save Securely"):
+            if s_user and s_pass:
+                set_config_value("email_user", s_user)
+                enc = encrypt_val(s_pass)
+                if enc: set_config_value("email_pass", enc)
+                st.success("Credentials Encrypted.")
+    
     st.markdown("---")
+    st.subheader("⚙️ VPS Fleet Management")
     
-    # Global Notification
-    st.subheader("🔔 Notification Rules")
-    global_notify = int(get_config_value('global_notify', 1))
-    new_global_notify = st.toggle("Enable All Email Notifications", value=(global_notify == 1))
-    
-    if (new_global_notify and global_notify == 0) or (not new_global_notify and global_notify == 1):
-        set_config_value('global_notify', 1 if new_global_notify else 0)
-        st.success("Global notification setting updated.")
-        time.sleep(1)
-        st.rerun()
-
-    st.markdown("---")
-    
-    # Manage VPS Targets
-    st.subheader("🖥️ Manage VPS Targets")
-    
-    # Add New VPS
-    with st.expander("Add New VPS"):
-        with st.form("add_vps_form"):
-            c1, c2, c3 = st.columns([3, 3, 2])
-            new_name = c1.text_input("Server Name")
-            new_ip = c2.text_input("IP Address")
-            new_port = c3.number_input("Port", min_value=1, max_value=65535, value=22)
-            submitted = st.form_submit_button("Add VPS")
-            
-            if submitted:
-                if new_name and new_ip:
-                    if add_target(new_name, new_ip, new_port):
-                        st.success(f"Added {new_name}")
+    with st.expander("Add New Nucleus Target"):
+        with st.form("fleet_form"):
+            f_name = st.text_input("Server Title")
+            f_ip = st.text_input("IP (Primary Key)")
+            f_port = st.number_input("Node Exporter Port", value=9100)
+            if st.form_submit_button("Engage Target"):
+                if f_name and f_ip:
+                    if add_target(f_name, f_ip, f_port):
+                        st.success("Target Engaged.")
                         time.sleep(1)
                         st.rerun()
-                else:
-                    st.error("Please provide Name and IP.")
-    
-    # List/Edit VPS
-    st.write("Existing Targets:")
-    df_targets = get_targets()
-    
-    if not df_targets.empty:
-        # Header
-        h1, h2, h3, h4, h5, h6 = st.columns([3, 3, 2, 2, 2, 2])
-        h1.write("**Name**")
-        h2.write("**IP**")
-        h3.write("**Port**")
-        h4.write("**Monitoring**")
-        h5.write("**Notifications**")
-        h6.write("**Action**")
-        
-        for index, row in df_targets.iterrows():
-            c1, c2, c3, c4, c5, c6 = st.columns([3, 3, 2, 2, 2, 2])
-            c1.write(row['name'])
+
+    df_f = get_targets()
+    if not df_f.empty:
+        for idx, row in df_f.iterrows():
+            c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 1])
+            c1.write(f"**{row['name']}**")
             c2.write(row['ip'])
-            c3.write(str(row['port']))
             
-            # Toggles
-            is_enabled = c4.checkbox("On", value=bool(row['enabled']), key=f"en_{row['id']}")
-            is_notify = c5.checkbox("Alerts", value=bool(row['notify']), key=f"not_{row['id']}")
+            en = c3.toggle("Enabled", value=bool(row['enabled']), key=f"toe_{row['ip']}")
+            ni = c4.toggle("Alerts", value=bool(row['notify']), key=f"ton_{row['ip']}")
             
-            # Update logic check
-            if is_enabled != bool(row['enabled']) or is_notify != bool(row['notify']):
-                update_target(row['id'], is_enabled, is_notify)
-                st.toast(f"Updated {row['name']}")
-                
-            # Delete
-            if c6.button("🗑️", key=f"del_{row['id']}"):
-                delete_target(row['id'])
+            if en != bool(row['enabled']) or ni != bool(row['notify']):
+                update_target(row['ip'], en, ni)
                 st.rerun()
-    else:
-        st.info("No targets configured.")
-        
-# Footer
+                
+            if c5.button("🗑️", key=f"k_v_{row['ip']}"):
+                delete_target(row['ip'])
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("🧹 System Maintenance")
+    if st.button("⚠️ Purge Node Data", help="Wipes history & logs. Keeps configuration."):
+        if purge_database():
+            st.success("Nodes purged.")
+            st.rerun()
+
+    with st.expander("📜 Alert Audit Trail"):
+        conn = get_db_connection()
+        df_l = pd.read_sql_query("SELECT timestamp, recipient_email, vps_name, status FROM notification_logs ORDER BY timestamp DESC LIMIT 50", conn)
+        conn.close()
+        if not df_l.empty:
+            st.dataframe(df_l, width='stretch')
+
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #666;'>© 2026 Aigentss. All systems nominal.</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; font-size: 0.8em; color: gray;'>© 2026 Aigentss Pulse Infinity Core.</div>", unsafe_allow_html=True)
