@@ -8,7 +8,9 @@ import os
 import logging
 import pandas as pd
 import io
+import json
 import matplotlib.pyplot as plt
+import concurrent.futures
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -40,7 +42,8 @@ INITIAL_VPS_LIST = {
     "Autocom": "154.38.191.23",
     "1001Talleres": "147.93.179.212",
     "VPS-Testing": "82.25.84.232",
-    "IA LOCAL": "192.168.100.33"
+    "IA LOCAL": "192.168.100.33",
+    "AGENTE C1": "192.168.100.71"
 }
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -60,6 +63,11 @@ CIPHER_SUITE = Fernet(load_or_create_key())
 def init_system():
     # Database Setup
     conn = sqlite3.connect(DB_NAME)
+    
+    # Pragma for Idempotency and Performance
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS status_history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,29 +80,27 @@ def init_system():
                   disk REAL DEFAULT 0,
                   timestamp DATETIME)''')
     
-    # Table VPS Targets with IP as Primary Key
-    c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vps_targets'")
-    table_exists = c.fetchone()[0]
-
-    if table_exists:
-        try:
-            # Deduplication: Hyundai vs Testing
-            c.execute("DELETE FROM vps_targets WHERE ip='82.25.84.232' AND name='Hyundai'")
-            
-            # Migration to IP Primary Key
-            c.execute("CREATE TABLE IF NOT EXISTS vps_targets_new (name TEXT, ip TEXT PRIMARY KEY, port INTEGER DEFAULT 9100, enabled INTEGER DEFAULT 1, notify INTEGER DEFAULT 1)")
-            c.execute("INSERT OR IGNORE INTO vps_targets_new (name, ip, port, enabled, notify) SELECT name, ip, 9100, enabled, notify FROM vps_targets")
-            c.execute("DROP TABLE vps_targets")
-            c.execute("ALTER TABLE vps_targets_new RENAME TO vps_targets")
-        except Exception as e:
-            logging.error(f"Migration error: {e}")
-    else:
-        c.execute('''CREATE TABLE vps_targets
+    # Migration handling
+    try:
+        c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vps_targets'")
+        table_exists = c.fetchone()[0]
+        
+        # Check if vps_targets has primary key ip by checking typical failure or schema
+        # For simplicity, we create if not exists or ensure fields.
+        c.execute('''CREATE TABLE IF NOT EXISTS vps_targets
                      (name TEXT,
                       ip TEXT PRIMARY KEY,
                       port INTEGER DEFAULT 9100,
                       enabled INTEGER DEFAULT 1,
                       notify INTEGER DEFAULT 1)''')
+    except Exception as e:
+        logging.warning(f"Table migration exception: {e}")
+
+    # Docker Metrics Snapshot Table
+    c.execute('''CREATE TABLE IF NOT EXISTS docker_snapshot
+                 (ip TEXT PRIMARY KEY,
+                  json_data TEXT,
+                  updated_at DATETIME)''')
 
     # Config & Notification Logs
     c.execute('''CREATE TABLE IF NOT EXISTS notification_logs
@@ -226,32 +232,56 @@ def should_send_alert(ip, target_notify):
     if int(get_config_val('global_notify', 1)) == 0 or target_notify == 0: return False
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    # Check previous status to only alert on transition UP -> DOWN
     c.execute("SELECT status FROM status_history WHERE ip=? ORDER BY timestamp DESC LIMIT 1", (ip,))
     res = c.fetchone()
     conn.close()
-    return True if res is None or res[0] == 1 else False
+    
+    # If no history, assume UP to trigger alert on first down? 
+    # Or assume invalid to avoid spam on startup. Let's send if previous was UP (1).
+    if res and res[0] == 1:
+        return True
+    return False
 
 def check_vps(name, ip, notify_flag):
-    # Port 9100 Bypass
+    # Port 9100 Stealth Monitoring
     port = 9100
     try:
         start = time.time()
+        # 1. TCP Connect Check
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(7.0)
         s.connect((ip, port)); s.close()
         latency = (time.time() - start) * 1000
+        
+        # 2. Prometheus Metrics
         vit = prometheus_metrics.get_node_metrics(ip)
         log_to_db(name, ip, 1, latency, vit['cpu'], vit['ram'], vit['disk'])
-        logging.info(f"{name} ({ip}): UP [Bypass]")
+        
+        # 3. Docker Metrics (Fetch and store snapshot)
+        docker_stats = prometheus_metrics.get_docker_metrics(ip)
+        if docker_stats:
+            log_docker_snapshot(ip, docker_stats)
+            
+        logging.info(f"{name} ({ip}): UP [Bypass] - {latency:.2f}ms")
     except Exception as e:
-        if should_send_alert(ip, notify_flag): send_alert(name, ip, str(e))
+        if should_send_alert(ip, notify_flag): 
+            send_alert(name, ip, str(e))
         log_to_db(name, ip, 0, 0, 0, 0, 0)
-        logging.warning(f"{name} ({ip}): DOWN")
+        logging.warning(f"{name} ({ip}): DOWN - {e}")
 
 def log_to_db(name, ip, status, lat, cpu, ram, disk):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("INSERT INTO status_history (name, ip, status, latency, cpu, ram, disk, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
               (name, ip, status, lat, cpu, ram, disk, datetime.now()))
+    conn.commit(); conn.close()
+
+def log_docker_snapshot(ip, data):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    json_str = json.dumps(data)
+    c.execute("INSERT OR REPLACE INTO docker_snapshot (ip, json_data, updated_at) VALUES (?, ?, ?)",
+              (ip, json_str, datetime.now()))
     conn.commit(); conn.close()
 
 # --- THREAD MANAGEMENT ---
@@ -273,10 +303,13 @@ def master_loop():
     init_system()
     while True:
         targets = get_active_targets()
-        threads = [threading.Thread(target=check_vps, args=(t[0], t[1], t[3])) for t in targets]
-        for t in threads: t.start()
-        for t in threads: t.join()
         interval = int(get_config_val('check_interval', 60))
+        
+        # Concurrency de Élite: ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(check_vps, t[0], t[1], t[3]) for t in targets]
+            concurrent.futures.wait(futures)
+            
         time.sleep(interval)
 
 if __name__ == "__main__":

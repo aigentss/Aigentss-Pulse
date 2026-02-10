@@ -4,3 +4,4 @@ cryptography
 matplotlib
 requests
 psutil
+prometheus-api-client
