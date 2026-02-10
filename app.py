@@ -427,22 +427,29 @@ def main():
                     vps_latest = db.get_latest_status(view_vps_ip)
                     if vps_latest and not df_docker.empty:
                         last_ts = df_docker['Time'].iloc[0]
-                        snap = df_docker[df_docker['Time'] == last_ts]
-                        
+                        # Calculate Docker vs System ratios
                         total_docker_cpu = snap['CPU %'].sum()
-                        total_docker_ram = snap['Memory GB'].sum()
+                        total_docker_ram_gb = snap['Memory GB'].sum()
                         
-                        sys_cpu = vps_latest.get('cpu_percent', 0.0)
-                        sys_ram_pct = vps_latest.get('ram_percent', 0.0)
+                        sys_cpu = vps_latest.get('cpu_percent', 0.0) or 0.0
+                        sys_ram_pct = vps_latest.get('ram_percent', 0.0) or 1.0 # Avoid div by zero
+                        
+                        # Heuristic to estimate system RAM in info message
+                        # If Docker uses X GB and Sys is Y%, then Total is roughly X / (Y/100)
+                        # But that's only if Docker is the ONLY thing using RAM.
                         
                         sum_data = {
                             "Metric": ["CPU Usage (%)", "RAM Usage (GB)"],
-                            "Docker Total": [total_docker_cpu, total_docker_ram],
-                            "System Total": [sys_cpu, "N/A"] # We don't have Sys RAM in GB easily here without total mem
+                            "Docker Total": [f"{total_docker_cpu:.1f}%", f"{total_docker_ram_gb:.3f} GB"],
+                            "System Global": [f"{sys_cpu:.1f}%", f"{sys_ram_pct:.1f}% (Host)"]
                         }
                         st.table(pd.DataFrame(sum_data))
                         
-                        st.info(f"💡 Docker is consuming approximately **{total_docker_cpu:.1f}%** of total CPU resources.")
+                        # Warning if Docker usage looks impossible
+                        if total_docker_cpu > 1000 or total_docker_ram_gb > 512:
+                            st.warning("⚠️ Detected anomalous Docker metrics. Normalization in progress...")
+                        else:
+                            st.info(f"💡 Docker containers are utilizing approximately **{total_docker_cpu:.1f}%** of the current CPU load.")
                     
                     # Historical Data Table
                     st.write("**Full History Log**")

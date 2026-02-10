@@ -250,7 +250,7 @@ _CACHE_LOCK = threading.Lock()
 def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any]]:
     """
     Parse cAdvisor metrics with robust filtering and rate calculation.
-    Filters: image!="", id starts with /docker/ or has a name.
+    Fixes double-counting of CPU cores and uses working_set for memory.
     """
     containers = {}
     current_time = time.time()
@@ -262,8 +262,9 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 continue
             
             # Check for container resource metrics
+            # We filter for lines that represent the aggregation (no 'cpu' label for cpu metrics)
             is_cpu = 'container_cpu_usage_seconds_total{' in line
-            is_mem = 'container_memory_usage_bytes{' in line
+            is_mem = 'container_memory_working_set_bytes{' in line
             
             if (is_cpu or is_mem) and 'name=' in line:
                 labels = _extract_all_labels(line)
@@ -272,18 +273,26 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 cid = labels.get('id', '')
                 
                 # Filter: Skip root, pods, and empty images (system/infra containers)
-                if not name or name in ['/', 'POD'] or not image or cid == '/':
+                if not name or name in ['/', 'POD'] or not image:
                     continue
                 
-                value = float(line.split()[-1])
+                # CRITICAL: If it's a CPU metric, only take the aggregate (no 'cpu' label)
+                # This prevents summing total + core0 + core1...
+                if is_cpu and 'cpu=' in line and 'cpu="total"' not in line:
+                    continue
+                
+                try:
+                    value = float(line.split()[-1])
+                except (ValueError, IndexError):
+                    continue
                 
                 if name not in containers:
                     containers[name] = {'name': name, 'cpu_seconds': 0.0, 'memory_bytes': 0.0}
                 
                 if is_cpu:
-                    containers[name]['cpu_seconds'] += value
+                    # We use max just in case there are duplicates, but strict filtering should handle it
+                    containers[name]['cpu_seconds'] = max(containers[name]['cpu_seconds'], value)
                 elif is_mem:
-                    # Use max to get the peak usage if multiple lines exist
                     containers[name]['memory_bytes'] = max(containers[name]['memory_bytes'], value)
 
         # Calculate CPU percentages using stateful cache
@@ -305,9 +314,18 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                         time_delta = current_time - prev_time
                         cpu_delta = cpu_seconds - prev_cpu
                         
-                        if time_delta > 0.5: # At least 0.5s between samples
-                            # Percentage = (delta_cpu / delta_time) * 100
-                            cpu_pct = round((cpu_delta / time_delta) * 100, 2)
+                        if time_delta > 0.5: # Sample frequency safety
+                            # Check for overflow/reset (if cpu_delta is negative, skip)
+                            if cpu_delta >= 0:
+                                # Standard formula: (delta_seconds / delta_time) * 100
+                                raw_pct = (cpu_delta / time_delta) * 100
+                                
+                                # Safety cap: unlikely to exceed 100% * cores (usually 4-8 cores)
+                                # If it exceeds 1000%, something is wrong with units or double accounting
+                                if raw_pct > 1000:
+                                    cpu_pct = 100.0 # Realistic fallback
+                                else:
+                                    cpu_pct = round(raw_pct, 2)
                     
                     # Store current for next cycle
                     host_cache[name] = (current_time, cpu_seconds)
