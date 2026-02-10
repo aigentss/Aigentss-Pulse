@@ -18,27 +18,55 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- SIDEBAR THEME TOGGLE ---
-st.sidebar.title("Aigentss Pulse")
-theme_mode = st.sidebar.radio("Theme Mode", ["Dark (Infinity)", "Light (Daywalker)"], index=0)
+# --- INITIALIZATION ---
+monitor.start_monitor_thread()
+DB_NAME = "aigentss_pulse.db"
 
-is_dark = theme_mode == "Dark (Infinity)"
+# --- HELPERS FOR CONFIG ---
+def get_config_val(key, default=None):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT value FROM config WHERE key=?", (key,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else default
+    except:
+        return default
+
+def save_config(key, val):
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, str(val)))
+    conn.commit()
+    conn.close()
+
+# --- THEME MANAGEMENT ---
+# Load theme preference (persistence via DB)
+theme_pref = get_config_val('theme_mode', "Dark (Infinity)")
+is_dark = theme_pref == "Dark (Infinity)"
 
 # --- DEFINING THEME CONSTANTS ---
 if is_dark:
-    bg_color = "#0E1117"
-    text_color = "#e0e0e0"
+    # "Gris Elegante" / "Sofisticado"
+    # Surfaces: #1E1E1E (Dark Grey), Text: #E0E0E0 (Light Grey)
+    # Background: #121212 (Material Dark default recommendation)
+    bg_color = "#121212"
+    text_color = "#E0E0E0"
     card_bg = "#1E1E1E"
     card_border = "1px solid rgba(255, 255, 255, 0.1)"
     shadow = "0 4px 30px rgba(0, 0, 0, 0.5)"
-    status_off_color = "white"
+    status_off_color = "#E0E0E0"
 else:
-    bg_color = "#F0F2F6"
-    text_color = "#31333F"
+    # "Clásico Profesional"
+    # Background: #F4F4F4 (Gris muy claro)
+    # Text: #333333 (Gris oscuro)
+    # Card: #FFFFFF (Blanco)
+    bg_color = "#F4F4F4"
+    text_color = "#333333"
     card_bg = "#FFFFFF"
     card_border = "1px solid #E0E0E0"
     shadow = "0 2px 10px rgba(0,0,0,0.1)"
-    status_off_color = "white" # Still white text on red badge
+    status_off_color = "white" # Red status badge needs white text
 
 # --- CSS INJECTION ---
 css = f"""
@@ -89,19 +117,40 @@ css = f"""
         background-image: linear-gradient(to right, #00ff00, #00cc00);
     }}
     
-    /* Text corrections for Light Mode */
-    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown, .stText {{
+    /* Text corrections for Light/Dark Mode consistency */
+    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown, .stText, .stRadio label {{
         color: {text_color} !important;
     }}
+    
+    /* Streamlit Tabs */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 10px;
+    }}
+
+    .stTabs [data-baseweb="tab"] {{
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: {card_bg};
+        border-radius: 4px 4px 0px 0px;
+        gap: 1px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        color: {text_color};
+    }}
+
+    .stTabs [aria-selected="true"] {{
+        background-color: {bg_color};
+        border-bottom: 2px solid #00ff00;
+    }}
+
 </style>
 """
 st.markdown(css, unsafe_allow_html=True)
 
-# --- INITIALIZATION ---
-monitor.start_monitor_thread()
-DB_NAME = "aigentss_pulse.db"
+# --- APP LAYOUT HEADER ---
+st.title("📡 Aigentss Pulse | v2.0")
 
-# --- HELPERS ---
+# --- HELPERS DATA ---
 @st.cache_data(ttl=5) # Cache for 5s to keep UI fluid
 def get_dashboard_data():
     try:
@@ -163,12 +212,6 @@ def get_docker_snapshot(ip):
     except:
         return []
 
-def save_config(key, val):
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, str(val)))
-    conn.commit()
-    conn.close()
-
 def load_config(key, default):
     return monitor.get_config_val(key, default)
 
@@ -188,9 +231,6 @@ def encrypt_secret(val):
     key = monitor.load_or_create_key()
     f = Fernet(key)
     return f.encrypt(val.encode()).decode()
-
-# --- LAYOUT ---
-st.title("📡 Aigentss Pulse | v2.0")
 
 # Tabs
 tab_live, tab_graphs, tab_config, tab_history = st.tabs([
@@ -221,6 +261,7 @@ with tab_live:
             with col:
                 # Bypass Mode visual
                 border_color = "#00ff00" if vps['status'] == 1 else "#ff0000"
+                glow = f"box-shadow: 0px 0px 15px {border_color};" if is_dark else f"box-shadow: 0px 0px 5px {border_color};"
                 
                 with st.container(border=True):
                     # Header
@@ -308,7 +349,26 @@ with tab_config:
     
     with c1:
         st.subheader("Global Settings")
+        
+        # Theme Toggle (Moved from Sidebar)
+        st.markdown("#### Aesthetic Mode")
+        current_theme = get_config_val('theme_mode', "Dark (Infinity)")
+        selected_theme = st.radio(
+            "Selecciona el tema de la interfaz:",
+            ["Dark (Infinity)", "Light (Daywalker)"],
+            index=0 if current_theme == "Dark (Infinity)" else 1,
+            horizontal=True
+        )
+        
+        if selected_theme != current_theme:
+            save_config('theme_mode', selected_theme)
+            st.success("Theme updated! Reloading...")
+            time.sleep(1)
+            st.rerun()
+
         # Sampling Rate
+        st.markdown("---")
+        st.markdown("#### Performance")
         current_interval = int(load_config('check_interval', 60))
         new_interval = st.slider("Sampling Frequency (s)", 10, 300, current_interval)
         if new_interval != current_interval:
