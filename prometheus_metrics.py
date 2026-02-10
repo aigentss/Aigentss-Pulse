@@ -1,85 +1,398 @@
 """
-Prometheus Node Exporter Metrics Fetcher
-Fetches CPU, RAM, and Disk usage from prometheus-node-exporter endpoints.
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
+
+Prometheus metrics scraper for Node Exporter (System) and cAdvisor (Docker).
+Supports exponential backoff retries and stealth port checking.
 """
 
-import requests
-import re
+import socket
+import time
 import logging
+import threading
+import httpx
+from typing import Dict, List, Optional, Any, Callable
 
-def get_node_metrics(ip_address, port=9100, timeout=2):
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# ========== STEALTH PORT CHECKING ==========
+
+def is_port_open(host: str, port: int, timeout: int = 5) -> bool:
     """
-    Fetches system metrics from a Prometheus Node Exporter endpoint.
+    Stealth check if a port is open before attempting HTTP connection.
     
     Args:
-        ip_address: Target IP address
-        port: Node Exporter port (default 9100)
-        timeout: Request timeout in seconds
-    
+        host: IP address or hostname
+        port: Port number
+        timeout: Connection timeout in seconds
+        
     Returns:
-        dict with keys: cpu, ram, disk (percentage values)
+        True if port is open, False otherwise
     """
-    metrics = {'cpu': 0, 'ram': 0, 'disk': 0}
-    
     try:
-        url = f"http://{ip_address}:{port}/metrics"
-        response = requests.get(url, timeout=timeout)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, socket.error, ConnectionRefusedError, OSError):
+        return False
+
+
+# ========== RETRY LOGIC ==========
+
+def retry_with_backoff(func, max_attempts: int = 3, base_delay: float = 1.0):
+    """
+    Retry a function with exponential backoff.
+    
+    Args:
+        func: Callable to retry
+        max_attempts: Maximum number of attempts
+        base_delay: Base delay in seconds (doubles each retry)
         
-        if response.status_code != 200:
-            logging.warning(f"Node Exporter {ip_address}: HTTP {response.status_code}")
-            return metrics
+    Returns:
+        Function result or None if all attempts fail
+    """
+    for attempt in range(max_attempts):
+        try:
+            return func()
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"All {max_attempts} attempts failed: {e}")
+                return None
+
+
+# ========== NODE EXPORTER SCRAPING ==========
+
+def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 5) -> Optional[Dict[str, Any]]:
+    """
+    Scrape system metrics from Node Exporter.
+    
+    Args:
+        host: IP address of the VPS
+        port: Node Exporter port (default 9100)
+        timeout: HTTP timeout in seconds
         
-        text = response.text
+    Returns:
+        Dictionary with metrics: {
+            'status': 'UP' | 'DOWN',
+            'latency_ms': float,
+            'cpu_percent': float,
+            'ram_percent': float,
+            'disk_percent': float
+        }
+    """
+    # Stealth check
+    if not is_port_open(host, port, timeout):
+        return {
+            'status': 'DOWN',
+            'latency_ms': None,
+            'cpu_percent': None,
+            'ram_percent': None,
+            'disk_percent': None
+        }
+    
+    def _fetch():
+        start_time = time.time()
+        url = f"http://{host}:{port}/metrics"
         
-        # --- CPU Usage ---
-        # Calculate from node_cpu_seconds_total (sum all idle across cores)
-        # Formula: 100 - (sum_idle / sum_total) * 100
-        cpu_idle_matches = re.findall(r'node_cpu_seconds_total\{[^}]*mode="idle"[^}]*\}\s+([\d.]+)', text)
-        cpu_total_matches = re.findall(r'node_cpu_seconds_total\{[^}]*\}\s+([\d.]+)', text)
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            
+            latency_ms = (time.time() - start_time) * 1000
+            metrics_text = response.text
+            
+            # Parse metrics
+            cpu_percent = _parse_cpu_usage(metrics_text)
+            ram_percent = _parse_memory_usage(metrics_text)
+            disk_percent = _parse_disk_usage(metrics_text)
+            
+            return {
+                'status': 'UP',
+                'latency_ms': round(latency_ms, 2),
+                'cpu_percent': cpu_percent,
+                'ram_percent': ram_percent,
+                'disk_percent': disk_percent
+            }
+    
+    return retry_with_backoff(_fetch, max_attempts=3, base_delay=1.0)
+
+
+def _parse_cpu_usage(metrics_text: str) -> Optional[float]:
+    """
+    Calculate CPU usage from node_cpu_seconds_total.
+    Formula: 100 - (sum_idle / sum_total) * 100
+    """
+    try:
+        import re
         
-        if cpu_idle_matches and cpu_total_matches:
-            idle_seconds = sum(float(m) for m in cpu_idle_matches)
-            total_seconds = sum(float(m) for m in cpu_total_matches)
+        # Extract all idle CPU seconds
+        idle_matches = re.findall(r'node_cpu_seconds_total\{[^}]*mode="idle"[^}]*\}\s+([\d.]+)', metrics_text)
+        # Extract all total CPU seconds
+        total_matches = re.findall(r'node_cpu_seconds_total\{[^}]*\}\s+([\d.]+)', metrics_text)
+        
+        if idle_matches and total_matches:
+            idle_seconds = sum(float(m) for m in idle_matches)
+            total_seconds = sum(float(m) for m in total_matches)
+            
             if total_seconds > 0:
                 idle_pct = (idle_seconds / total_seconds) * 100
-                metrics['cpu'] = round(100 - idle_pct, 1)
+                return round(100 - idle_pct, 2)
         
-        # --- RAM Usage ---
-        mem_total_match = re.search(r'node_memory_MemTotal_bytes\s+([\d.e+]+)', text)
-        mem_avail_match = re.search(r'node_memory_MemAvailable_bytes\s+([\d.e+]+)', text)
+        return None
+    except Exception as e:
+        logger.warning(f"CPU parsing error: {e}")
+        return None
+
+
+def _parse_memory_usage(metrics_text: str) -> Optional[float]:
+    """Calculate RAM usage percentage from available/total memory."""
+    try:
+        import re
+        
+        mem_total_match = re.search(r'node_memory_MemTotal_bytes\s+([\d.e+]+)', metrics_text)
+        mem_avail_match = re.search(r'node_memory_MemAvailable_bytes\s+([\d.e+]+)', metrics_text)
         
         if mem_total_match and mem_avail_match:
             total = float(mem_total_match.group(1))
             available = float(mem_avail_match.group(1))
+            
             if total > 0:
                 used_pct = ((total - available) / total) * 100
-                metrics['ram'] = round(used_pct, 1)
+                return round(used_pct, 2)
         
-        # --- Disk Usage (root filesystem) ---
-        # Look for mountpoint="/"
-        disk_size_match = re.search(r'node_filesystem_size_bytes\{.*mountpoint="/",.*\}\s+([\d.e+]+)', text)
-        disk_avail_match = re.search(r'node_filesystem_avail_bytes\{.*mountpoint="/",.*\}\s+([\d.e+]+)', text)
+        return None
+    except Exception as e:
+        logger.warning(f"Memory parsing error: {e}")
+        return None
+
+
+def _parse_disk_usage(metrics_text: str) -> Optional[float]:
+    """Calculate disk usage percentage for root filesystem."""
+    try:
+        import re
         
-        # Fallback: try without explicit mountpoint filter (first match)
+        # Try to find root filesystem first
+        disk_size_match = re.search(r'node_filesystem_size_bytes\{[^}]*mountpoint="/"[^}]*\}\s+([\d.e+]+)', metrics_text)
+        disk_avail_match = re.search(r'node_filesystem_avail_bytes\{[^}]*mountpoint="/"[^}]*\}\s+([\d.e+]+)', metrics_text)
+        
+        # Fallback: try ext4 filesystem
         if not disk_size_match:
-            disk_size_match = re.search(r'node_filesystem_size_bytes\{.*fstype="ext4".*\}\s+([\d.e+]+)', text)
-            disk_avail_match = re.search(r'node_filesystem_avail_bytes\{.*fstype="ext4".*\}\s+([\d.e+]+)', text)
+            disk_size_match = re.search(r'node_filesystem_size_bytes\{[^}]*fstype="ext4"[^}]*\}\s+([\d.e+]+)', metrics_text)
+            disk_avail_match = re.search(r'node_filesystem_avail_bytes\{[^}]*fstype="ext4"[^}]*\}\s+([\d.e+]+)', metrics_text)
         
         if disk_size_match and disk_avail_match:
             size = float(disk_size_match.group(1))
             avail = float(disk_avail_match.group(1))
+            
             if size > 0:
                 used_pct = ((size - avail) / size) * 100
-                metrics['disk'] = round(used_pct, 1)
+                return round(used_pct, 2)
         
-        return metrics
-        
-    except requests.exceptions.Timeout:
-        logging.debug(f"Node Exporter {ip_address}: Timeout")
-        return metrics
-    except requests.exceptions.ConnectionError:
-        logging.debug(f"Node Exporter {ip_address}: Connection refused")
-        return metrics
+        return None
     except Exception as e:
-        logging.error(f"Node Exporter {ip_address}: {e}")
-        return metrics
+        logger.warning(f"Disk parsing error: {e}")
+        return None
+
+
+# ========== CADVISOR SCRAPING (DOCKER METRICS) ==========
+
+def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5) -> Optional[List[Dict[str, Any]]]:
+    """
+    Scrape Docker container metrics from cAdvisor.
+    
+    Args:
+        host: IP address of the VPS
+        port: cAdvisor port (default 8080)
+        timeout: HTTP timeout in seconds
+        
+    Returns:
+        List of container metrics: [
+            {
+                'name': str,
+                'cpu_percent': float,
+                'memory_mb': float,
+                'memory_limit_mb': float
+            },
+            ...
+        ]
+    """
+    # Stealth check
+    if not is_port_open(host, port, timeout):
+        logger.info(f"cAdvisor not available on {host}:{port}")
+        return None
+    
+    def _fetch():
+        url = f"http://{host}:{port}/metrics"
+        
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            
+            metrics_text = response.text
+            return _parse_container_metrics(metrics_text, host)
+    
+    return retry_with_backoff(_fetch, max_attempts=2, base_delay=1.0)
+
+
+# Global state for Docker CPU rate calculation
+# Format: {vps_ip: {container_name: (timestamp, cpu_seconds)}}
+_DOCKER_CPU_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any]]:
+    """
+    Parse cAdvisor metrics with robust filtering and rate calculation.
+    Filters: image!="", id starts with /docker/ or has a name.
+    """
+    containers = {}
+    current_time = time.time()
+    
+    try:
+        # Pre-parse labels and values
+        for line in metrics_text.split('\n'):
+            if not line or line.startswith('#'):
+                continue
+            
+            # Check for container resource metrics
+            is_cpu = 'container_cpu_usage_seconds_total{' in line
+            is_mem = 'container_memory_usage_bytes{' in line
+            
+            if (is_cpu or is_mem) and 'name=' in line:
+                labels = _extract_all_labels(line)
+                name = labels.get('name')
+                image = labels.get('image', '')
+                cid = labels.get('id', '')
+                
+                # Filter: Skip root, pods, and empty images (system/infra containers)
+                if not name or name in ['/', 'POD'] or not image or cid == '/':
+                    continue
+                
+                value = float(line.split()[-1])
+                
+                if name not in containers:
+                    containers[name] = {'name': name, 'cpu_seconds': 0.0, 'memory_bytes': 0.0}
+                
+                if is_cpu:
+                    containers[name]['cpu_seconds'] += value
+                elif is_mem:
+                    # Use max to get the peak usage if multiple lines exist
+                    containers[name]['memory_bytes'] = max(containers[name]['memory_bytes'], value)
+
+        # Calculate CPU percentages using stateful cache
+        with _CACHE_LOCK:
+            if host not in _DOCKER_CPU_CACHE:
+                _DOCKER_CPU_CACHE[host] = {}
+            
+            host_cache = _DOCKER_CPU_CACHE[host]
+            result = []
+            
+            for name, stats in containers.items():
+                cpu_seconds = stats['cpu_seconds']
+                mem_bytes = stats['memory_bytes']
+                cpu_pct = 0.0
+                
+                if cpu_seconds > 0:
+                    if name in host_cache:
+                        prev_time, prev_cpu = host_cache[name]
+                        time_delta = current_time - prev_time
+                        cpu_delta = cpu_seconds - prev_cpu
+                        
+                        if time_delta > 0.5: # At least 0.5s between samples
+                            # Percentage = (delta_cpu / delta_time) * 100
+                            cpu_pct = round((cpu_delta / time_delta) * 100, 2)
+                    
+                    # Store current for next cycle
+                    host_cache[name] = (current_time, cpu_seconds)
+                
+                result.append({
+                    'name': name,
+                    'cpu_percent': max(0.0, cpu_pct),
+                    'memory_mb': round(mem_bytes / (1024 * 1024), 2),
+                    'status': 'RUNNING'
+                })
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Container metrics parsing error: {e}")
+        return []
+
+def _extract_all_labels(line: str) -> Dict[str, str]:
+    """Extract all labels from a Prometheus metric line into a dict."""
+    labels = {}
+    try:
+        if '{' not in line or '}' not in line:
+            return labels
+        
+        label_str = line.split('{')[1].split('}')[0]
+        # Regex to handle quoted values with commas
+        import re
+        matches = re.finditer(r'([a-zA-Z0-9_]+)="([^"]*)"', label_str)
+        for m in matches:
+            labels[m.group(1)] = m.group(2)
+    except Exception:
+        pass
+    return labels
+
+def _extract_label_value(line: str, label: str) -> Optional[str]:
+    """Simple extractor for single label (kept for backward compat or quick checks)."""
+    labels = _extract_all_labels(line)
+    return labels.get(label)
+
+# Combined scraping logic
+
+
+# ========== COMBINED SCRAPING FUNCTION ==========
+
+def scrape_vps(
+    host: str,
+    node_port: int = 9100,
+    cadvisor_port: int = 8080,
+    include_docker: bool = True
+) -> Dict[str, Any]:
+    """
+    Scrape all available metrics from a VPS.
+    
+    Args:
+        host: IP address of the VPS
+        node_port: Node Exporter port
+        cadvisor_port: cAdvisor port
+        include_docker: Whether to attempt Docker metrics scraping
+        
+    Returns:
+        Combined metrics dictionary with system and Docker data
+    """
+    # Get system metrics
+    system_metrics = scrape_node_exporter(host, node_port)
+    
+    if not system_metrics:
+        system_metrics = {
+            'status': 'DOWN',
+            'latency_ms': None,
+            'cpu_percent': None,
+            'ram_percent': None,
+            'disk_percent': None
+        }
+    
+    result = {
+        'host': host,
+        'timestamp': int(time.time()),
+        **system_metrics
+    }
+    
+    # Get Docker metrics if requested and system is UP
+    if include_docker and system_metrics['status'] == 'UP':
+        docker_metrics = scrape_cadvisor(host, cadvisor_port)
+        result['docker_containers'] = docker_metrics if docker_metrics else []
+    else:
+        result['docker_containers'] = []
+    
+    return result

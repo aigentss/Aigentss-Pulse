@@ -1,0 +1,37 @@
+# Aigents Pulse v3.0 Configuration
+# Values here can be overridden via the UI
+
+monitoring:
+  interval_seconds: 60
+  max_workers: 32
+  timeout_seconds: 5
+  retry_attempts: 3
+
+ui:
+  theme: "Infinity"  # Options: "Infinity" (dark) or "Daywalker" (light)
+  refresh_interval: 10  # Seconds between UI auto-refresh
+  records_per_page: 50
+
+alerts:
+  enabled: true
+  graph_hours: 24  # Hours of history to include in alert graphs
+
+reports:
+  weekly_enabled: true
+  weekly_day: 1  # 0=Monday, 6=Sunday
+  weekly_hour: 8
+  monthly_enabled: true
+  monthly_day: 1  # Day of month
+  monthly_hour: 8
+
+# VPS inventory (managed via UI, can also be pre-configured here)
+vps_list: []
+# Example:
+# - ip: "192.168.1.100"
+#   name: "9rounds"
+#   port: 9100
+#   enabled: true
+# - ip: "192.168.1.101"
+#   name: "Quitomotors"
+#   port: 9100
+#   enabled: true

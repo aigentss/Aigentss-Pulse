@@ -1,283 +1,300 @@
-import prometheus_metrics
-import socket
-import time
-import threading
-import sqlite3
-import smtplib
-import os
-import logging
-import pandas as pd
-import io
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.image import MIMEImage
-from cryptography.fernet import Fernet
-
-# Fix for Python 3.12+ sqlite3 datetime deprecation
-def adapt_datetime(val):
-    return val.isoformat()
-
-def convert_datetime(val):
-    return datetime.fromisoformat(val.decode())
-
-sqlite3.register_adapter(datetime, adapt_datetime)
-sqlite3.register_converter("timestamp", convert_datetime)
-
-# Configuration
-DB_NAME = "aigentss_pulse.db"
-KEY_FILE = "secret.key"
-EXPORT_DIR = "exports"
-
-# Initial Seed List (Migrated to DB on first run)
-INITIAL_VPS_LIST = {
-    "9rounds": "217.76.58.149",
-    "Quitomotors": "194.163.160.139",
-    "Armacar": "109.199.117.80",
-    "Kia": "62.84.187.169",
-    "Hyundai": "154.38.191.168",
-    "Autocom": "154.38.191.23",
-    "1001Talleres": "147.93.179.212",
-    "VPS-Testing": "82.25.84.232",
-    "IA LOCAL": "192.168.100.33"
-}
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-def load_or_create_key():
-    if os.path.exists(KEY_FILE):
-        with open(KEY_FILE, "rb") as key_file:
-            return key_file.read()
-    else:
-        key = Fernet.generate_key()
-        with open(KEY_FILE, "wb") as key_file:
-            key_file.write(key)
-        return key
-
-CIPHER_SUITE = Fernet(load_or_create_key())
-
-def init_system():
-    # Database Setup
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS status_history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  name TEXT,
-                  ip TEXT,
-                  status INTEGER,
-                  latency REAL,
-                  cpu REAL DEFAULT 0,
-                  ram REAL DEFAULT 0,
-                  disk REAL DEFAULT 0,
-                  timestamp DATETIME)''')
-    
-    # Table VPS Targets with IP as Primary Key
-    c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='vps_targets'")
-    table_exists = c.fetchone()[0]
-
-    if table_exists:
-        try:
-            # Deduplication: Hyundai vs Testing
-            c.execute("DELETE FROM vps_targets WHERE ip='82.25.84.232' AND name='Hyundai'")
-            
-            # Migration to IP Primary Key
-            c.execute("CREATE TABLE IF NOT EXISTS vps_targets_new (name TEXT, ip TEXT PRIMARY KEY, port INTEGER DEFAULT 9100, enabled INTEGER DEFAULT 1, notify INTEGER DEFAULT 1)")
-            c.execute("INSERT OR IGNORE INTO vps_targets_new (name, ip, port, enabled, notify) SELECT name, ip, 9100, enabled, notify FROM vps_targets")
-            c.execute("DROP TABLE vps_targets")
-            c.execute("ALTER TABLE vps_targets_new RENAME TO vps_targets")
-        except Exception as e:
-            logging.error(f"Migration error: {e}")
-    else:
-        c.execute('''CREATE TABLE vps_targets
-                     (name TEXT,
-                      ip TEXT PRIMARY KEY,
-                      port INTEGER DEFAULT 9100,
-                      enabled INTEGER DEFAULT 1,
-                      notify INTEGER DEFAULT 1)''')
-
-    # Config & Notification Logs
-    c.execute('''CREATE TABLE IF NOT EXISTS notification_logs
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  timestamp DATETIME,
-                  recipient_email TEXT,
-                  vps_name TEXT,
-                  status TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)''')
-    
-    # Indices
-    c.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON status_history(timestamp)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ip ON status_history(ip)")
-    
-    # Seeds
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('check_interval', '60')")
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('global_notify', '1')")
-    
-    for name, ip in INITIAL_VPS_LIST.items():
-        c.execute("INSERT OR IGNORE INTO vps_targets (name, ip, port) VALUES (?, ?, 9100)", (name, ip))
-        c.execute("UPDATE vps_targets SET name=? WHERE ip=?", (name, ip))
-            
-    conn.commit()
-    conn.close()
-
-    if not os.path.exists(EXPORT_DIR):
-        os.makedirs(EXPORT_DIR)
-
-def get_config_val(key, default=None):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT value FROM config WHERE key=?", (key,))
-        result = c.fetchone()
-        conn.close()
-        return result[0] if result else default
-    except:
-        return default
-
-def get_decrypted_config(key):
-    val = get_config_val(key)
-    if not val: return None
-    try: return CIPHER_SUITE.decrypt(val.encode()).decode()
-    except: return None
-
-def get_active_targets():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT name, ip, port, notify FROM vps_targets WHERE enabled=1")
-        targets = c.fetchall()
-        conn.close()
-        return targets
-    except: return []
-
-def create_latency_graph(ip):
-    """PNG 24h graph."""
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cutoff = datetime.now() - timedelta(hours=24)
-        df = pd.read_sql_query("SELECT timestamp, latency FROM status_history WHERE ip=? AND timestamp >= ? ORDER BY timestamp ASC", 
-                               conn, params=(ip, cutoff))
-        conn.close()
-        if df.empty: return None
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        plt.figure(figsize=(8, 4))
-        plt.plot(df['timestamp'], df['latency'], color='#ff0000', linewidth=2)
-        plt.title(f"Latency Trend (Last 24h) - {ip}", color='white')
-        plt.gca().set_facecolor('#1e1e1e')
-        plt.gcf().set_facecolor('#1e1e1e')
-        plt.tick_params(colors='white')
-        img_data = io.BytesIO()
-        plt.savefig(img_data, format='png', bbox_inches='tight', facecolor='#1e1e1e')
-        plt.close()
-        img_data.seek(0)
-        return img_data.read()
-    except Exception as e:
-        logging.error(f"Graph error: {e}")
-        return None
-
-def send_alert_worker(vps_name, vps_ip, error_msg):
-    """Elite Async Alert."""
-    email_user = get_config_val('email_user')
-    email_pass = get_decrypted_config('email_pass')
-    if not email_user or not email_pass: return
-
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT cpu, ram, disk, timestamp FROM status_history WHERE ip=? AND status=1 ORDER BY timestamp DESC LIMIT 1", (vps_ip,))
-    last_up = c.fetchone()
-    conn.close()
-
-    vitals = f"CPU: {last_up[0]:.0f}% | RAM: {last_up[1]:.0f}% | DISK: {last_up[2]:.0f}%" if last_up else "Unknown"
-    ts = last_up[3] if last_up else "None"
-
-    msg = MIMEMultipart()
-    msg['Subject'] = f"🚨 ALERT: {vps_name} is DOWN"
-    msg['From'] = email_user
-    msg['To'] = email_user
-    body = f"""
-🐒 Aigentss Pulse | Intelligence Report
-SERVER: {vps_name} ({vps_ip})
-STATUS: 🔴 DOWN (Port 9100 Stealth)
-
-LAST HEARTBEAT (TS): {ts}
-LAST VITALS: {vitals}
-ERROR: {error_msg}
-
-24h trend graph attached.
 """
-    msg.attach(MIMEText(body, 'plain'))
-    graph = create_latency_graph(vps_ip)
-    if graph: msg.attach(MIMEImage(graph, name="trend.png"))
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
 
-    try:
-        s = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
-        s.starttls()
-        s.login(email_user, email_pass)
-        s.sendmail(email_user, email_user, msg.as_string())
-        s.quit()
-        logging.info(f"Elite alert sent: {vps_name}")
-    except Exception as e:
-        logging.error(f"Alert failed: {e}")
+Singleton Monitoring Daemon that periodically scrapes metrics from all enabled VPS
+using a thread pool for concurrent collection.
+"""
 
-def send_alert(name, ip, msg):
-    threading.Thread(target=send_alert_worker, args=(name, ip, msg), daemon=True).start()
+import threading
+import time
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Optional
+import yaml
 
-def should_send_alert(ip, target_notify):
-    if int(get_config_val('global_notify', 1)) == 0 or target_notify == 0: return False
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT status FROM status_history WHERE ip=? ORDER BY timestamp DESC LIMIT 1", (ip,))
-    res = c.fetchone()
-    conn.close()
-    return True if res is None or res[0] == 1 else False
+import db
+import prometheus_metrics
+import security_metrics
 
-def check_vps(name, ip, notify_flag):
-    # Port 9100 Bypass
-    port = 9100
-    try:
-        start = time.time()
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(7.0)
-        s.connect((ip, port)); s.close()
-        latency = (time.time() - start) * 1000
-        vit = prometheus_metrics.get_node_metrics(ip)
-        log_to_db(name, ip, 1, latency, vit['cpu'], vit['ram'], vit['disk'])
-        logging.info(f"{name} ({ip}): UP [Bypass]")
-    except Exception as e:
-        if should_send_alert(ip, notify_flag): send_alert(name, ip, str(e))
-        log_to_db(name, ip, 0, 0, 0, 0, 0)
-        logging.warning(f"{name} ({ip}): DOWN")
 
-def log_to_db(name, ip, status, lat, cpu, ram, disk):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO status_history (name, ip, status, latency, cpu, ram, disk, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-              (name, ip, status, lat, cpu, ram, disk, datetime.now()))
-    conn.commit(); conn.close()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- THREAD MANAGEMENT ---
-_monitor_thread = None
-_monitor_lock = threading.Lock()
 
-def start_monitor_thread():
-    """Thread-safe singleton starter for the monitor loop."""
-    global _monitor_thread
-    with _monitor_lock:
-        if _monitor_thread is None or not _monitor_thread.is_alive():
-            _monitor_thread = threading.Thread(target=master_loop, daemon=True)
-            _monitor_thread.start()
-            logging.info("Background monitor thread spawned.")
-        else:
-            logging.debug("Monitor thread already active.")
+class MonitorDaemon:
+    """
+    Singleton daemon for continuous VPS monitoring.
+    
+    Runs in a background thread and scrapes metrics from all enabled VPS
+    using parallel workers.
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        """Ensure only one instance exists (singleton pattern)."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        """Initialize daemon (only runs once due to singleton)."""
+        if self._initialized:
+            return
+        
+        self._initialized = True
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._interval = 60  # Default interval in seconds
+        self._max_workers = 32
+        
+        # Load configuration
+        self._load_config()
+    
+    def _load_config(self):
+        """Load configuration from config.yaml and DB."""
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    
+                    monitoring = config.get('monitoring', {})
+                    self._interval = monitoring.get('interval_seconds', 60)
+                    self._max_workers = monitoring.get('max_workers', 32)
+            
+            # Override with DB config if available
+            db_interval = db.get_config('monitoring_interval')
+            if db_interval:
+                self._interval = int(db_interval)
+            
+            logger.info(f"Monitor config: interval={self._interval}s, workers={self._max_workers}")
+        
+        except Exception as e:
+            logger.error(f"Config loading error: {e}. Using defaults.")
+    
+    def start(self, interval: Optional[int] = None):
+        """
+        Start the monitoring daemon.
+        
+        Args:
+            interval: Scraping interval in seconds (overrides config)
+        """
+        if self._running:
+            logger.info("Daemon already running")
+            return
+        
+        if interval:
+            self._interval = interval
+        
+        self._running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="MonitorDaemon")
+        self._thread.start()
+        
+        logger.info(f"✓ Monitor daemon started (interval={self._interval}s)")
+    
+    def stop(self):
+        """Stop the monitoring daemon gracefully."""
+        if not self._running:
+            return
+        
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+        
+        logger.info("Monitor daemon stopped")
+    
+    def _run_loop(self):
+        """Main monitoring loop (runs in background thread)."""
+        logger.info("Monitor loop started")
+        
+        while self._running:
+            try:
+                start_time = time.time()
+                
+                # Run collection cycle
+                self._collect_all_metrics()
+                
+                # Calculate sleep time
+                elapsed = time.time() - start_time
+                sleep_time = max(0, self._interval - elapsed)
+                
+                logger.info(f"Collection completed in {elapsed:.2f}s. Sleeping {sleep_time:.2f}s...")
+                
+                # Sleep in small chunks to allow quick shutdown
+                sleep_chunks = int(sleep_time / 0.5)
+                for _ in range(sleep_chunks):
+                    if not self._running:
+                        break
+                    time.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Collection cycle error: {e}", exc_info=True)
+                time.sleep(5)  # Brief pause before retrying
+    
+    def _collect_all_metrics(self):
+        """
+        Collect metrics from all enabled VPS using parallel workers.
+        """
+        # Get list of enabled VPS
+        vps_list = db.list_vps(enabled_only=True)
+        
+        if not vps_list:
+            logger.warning("No VPS configured for monitoring")
+            return
+        
+        logger.info(f"Collecting metrics from {len(vps_list)} VPS...")
+        
+        # Adjust worker count based on VPS count
+        worker_count = min(self._max_workers, len(vps_list), os.cpu_count() * 4 or 8)
+        
+        # Parallel collection with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            # Submit all VPS for scraping
+            future_to_vps = {
+                executor.submit(self._fetch_one, vps): vps
+                for vps in vps_list
+            }
+            
+            # Process results as they complete
+            success_count = 0
+            failure_count = 0
+            
+            for future in as_completed(future_to_vps):
+                vps = future_to_vps[future]
+                try:
+                    result = future.result(timeout=15)
+                    if result:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to collect from {vps['name']}: {e}")
+                    failure_count += 1
+        
+        logger.info(f"Collection complete: {success_count} success, {failure_count} failed")
+    
+    def _fetch_one(self, vps: Dict[str, Any]) -> bool:
+        """
+        Fetch metrics from a single VPS and save to database.
+        
+        Args:
+            vps: VPS dictionary from inventory
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            ip = vps['ip']
+            name = vps['name']
+            port = vps.get('port', 9100)
+            cadvisor_port = vps.get('cadvisor_port', 8080)
+            
+            logger.debug(f"Scraping {name} ({ip})...")
+            
+            # Scrape metrics
+            metrics = prometheus_metrics.scrape_vps(
+                host=ip,
+                node_port=port,
+                cadvisor_port=cadvisor_port,
+                include_docker=True
+            )
+            
+            # Save to database
+            success = db.save_status(
+                vps_ip=ip,
+                vps_name=name,
+                status=metrics['status'],
+                latency_ms=metrics.get('latency_ms'),
+                cpu_percent=metrics.get('cpu_percent'),
+                ram_percent=metrics.get('ram_percent'),
+                disk_percent=metrics.get('disk_percent')
+            )
+            
+            # Save Docker snapshot if available
+            if metrics.get('docker_containers'):
+                db.save_docker_snapshot(ip, metrics['docker_containers'])
+            
+            # 🔐 New: Collect Security State
+            try:
+                sec_state = security_metrics.collect_security_state(ip)
+                if sec_state:
+                    db.save_security_snapshot(ip, sec_state)
+                    # Check for security alerts
+                    try:
+                        import alert
+                        alert.check_and_alert_security(ip, name, sec_state)
+                    except (ImportError, AttributeError):
+                        pass
+            except Exception as sec_e:
+                logger.error(f"Security collection failed for {name}: {sec_e}")
+            
+            # Check for alerts (imported locally to avoid circular imports)
+            try:
+                import alert
+                alert.check_and_alert(ip, name, metrics['status'])
+            except ImportError:
+                pass  # Alert module not yet available
+            
+            logger.debug(f"✓ {name}: {metrics['status']} (latency={metrics.get('latency_ms')}ms)")
+            return success
+        
+        except Exception as e:
+            logger.error(f"Error fetching {vps.get('name', vps.get('ip'))}: {e}")
+            return False
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current daemon status."""
+        return {
+            'running': self._running,
+            'interval': self._interval,
+            'max_workers': self._max_workers,
+            'thread_alive': self._thread.is_alive() if self._thread else False
+        }
+    
+    def set_interval(self, interval: int):
+        """Update monitoring interval."""
+        if interval < 10:
+            raise ValueError("Interval must be at least 10 seconds")
+        
+        self._interval = interval
+        db.set_config('monitoring_interval', str(interval))
+        logger.info(f"Interval updated to {interval}s")
 
-def master_loop():
-    init_system()
-    while True:
-        targets = get_active_targets()
-        threads = [threading.Thread(target=check_vps, args=(t[0], t[1], t[3])) for t in targets]
-        for t in threads: t.start()
-        for t in threads: t.join()
-        interval = int(get_config_val('check_interval', 60))
-        time.sleep(interval)
 
-if __name__ == "__main__":
-    master_loop()
+# ========== CONVENIENCE FUNCTIONS ==========
+
+_daemon_instance = None
+
+def get_daemon() -> MonitorDaemon:
+    """Get the singleton daemon instance."""
+    global _daemon_instance
+    if _daemon_instance is None:
+        _daemon_instance = MonitorDaemon()
+    return _daemon_instance
+
+
+def start_daemon(interval: Optional[int] = None):
+    """Start the monitoring daemon."""
+    daemon = get_daemon()
+    daemon.start(interval)
+
+
+def stop_daemon():
+    """Stop the monitoring daemon."""
+    daemon = get_daemon()
+    daemon.stop()
+
+
+def get_daemon_status() -> Dict[str, Any]:
+    """Get daemon status."""
+    daemon = get_daemon()
+    return daemon.get_status()
