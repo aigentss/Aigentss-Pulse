@@ -258,7 +258,11 @@ def check_vps(name, ip, notify_flag):
         log_to_db(name, ip, 1, latency, vit['cpu'], vit['ram'], vit['disk'])
         
         # 3. Docker Metrics (Fetch and store snapshot)
-        docker_stats = prometheus_metrics.get_docker_metrics(ip)
+        # Try port 8080 (cAdvisor) first, then fallback to 9100 if user has a custom setup
+        docker_stats = prometheus_metrics.get_docker_metrics(ip, port=8080)
+        if not docker_stats:
+             docker_stats = prometheus_metrics.get_docker_metrics(ip, port=9100)
+             
         if docker_stats:
             log_docker_snapshot(ip, docker_stats)
             

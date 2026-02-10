@@ -15,61 +15,87 @@ st.set_page_config(
     page_title="Aigentss Pulse | Infrastructure Core",
     layout="wide",
     page_icon="📡",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# --- THEME & CSS (Aigentss Infinity Style) ---
-st.markdown("""
+# --- SIDEBAR THEME TOGGLE ---
+st.sidebar.title("Aigentss Pulse")
+theme_mode = st.sidebar.radio("Theme Mode", ["Dark (Infinity)", "Light (Daywalker)"], index=0)
+
+is_dark = theme_mode == "Dark (Infinity)"
+
+# --- DEFINING THEME CONSTANTS ---
+if is_dark:
+    bg_color = "#0E1117"
+    text_color = "#e0e0e0"
+    card_bg = "#1E1E1E"
+    card_border = "1px solid rgba(255, 255, 255, 0.1)"
+    shadow = "0 4px 30px rgba(0, 0, 0, 0.5)"
+    status_off_color = "white"
+else:
+    bg_color = "#F0F2F6"
+    text_color = "#31333F"
+    card_bg = "#FFFFFF"
+    card_border = "1px solid #E0E0E0"
+    shadow = "0 2px 10px rgba(0,0,0,0.1)"
+    status_off_color = "white" # Still white text on red badge
+
+# --- CSS INJECTION ---
+css = f"""
 <style>
-    /* Dark Mode Global */
-    .stApp {
-        background-color: #0E1117;
-        color: #e0e0e0;
+    /* Global App Background */
+    .stApp {{
+        background-color: {bg_color};
+        color: {text_color};
         font-family: 'Inter', sans-serif;
-    }
+    }}
     
     /* Card Style - Glassmorphism & Neon */
-    div.css-1r6slb0.e1tzin5v2 {
-        background-color: #1E1E1E;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+    div.css-1r6slb0.e1tzin5v2, .stContainer {{
+        background-color: {card_bg};
+        border: {card_border};
         border-radius: 12px;
-        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        box-shadow: {shadow};
         backdrop-filter: blur(5px);
         padding: 15px;
         transition: transform 0.2s;
-    }
-    div.css-1r6slb0.e1tzin5v2:hover {
-        border-color: rgba(255, 255, 255, 0.3);
-    }
-
-    /* Metric Containers */
-    .vps-card {
-        background-color: #1E1E1E;
+    }}
+    
+    /* Metric Containers (Custom Class) */
+    .vps-card {{
+        background-color: {card_bg};
         padding: 20px;
         border-radius: 10px;
-        border: 1px solid #333;
+        border: {card_border};
         margin-bottom: 20px;
-        box-shadow: 0 0 10px rgba(0,0,0,0.5);
-    }
+        box-shadow: {shadow};
+        color: {text_color};
+    }}
     
-    .status-badge {
+    .status-badge {{
         font-weight: bold;
         padding: 5px 10px;
         border-radius: 5px;
         color: black;
         text-transform: uppercase;
         font-size: 0.8rem;
-    }
-    .status-up { background-color: #00ff00; box-shadow: 0 0 10px #00ff00; }
-    .status-down { background-color: #ff0000; box-shadow: 0 0 10px #ff0000; color: white; }
+    }}
+    .status-up {{ background-color: #00ff00; box-shadow: 0 0 10px #00ff00; }}
+    .status-down {{ background-color: #ff0000; box-shadow: 0 0 10px #ff0000; color: {status_off_color}; }}
 
     /* Custom Progress Bars */
-    .stProgress > div > div > div > div {
+    .stProgress > div > div > div > div {{
         background-color: #00ff00;
         background-image: linear-gradient(to right, #00ff00, #00cc00);
-    }
+    }}
+    
+    /* Text corrections for Light Mode */
+    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown, .stText {{
+        color: {text_color} !important;
+    }}
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(css, unsafe_allow_html=True)
 
 # --- INITIALIZATION ---
 monitor.start_monitor_thread()
@@ -108,6 +134,21 @@ def get_dashboard_data():
         return results
     except Exception as e:
         return []
+
+def get_historical_metrics(hours=24):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cutoff = datetime.now() - timedelta(hours=hours)
+        df = pd.read_sql_query(
+            "SELECT name, ip, latency, cpu, ram, disk, timestamp FROM status_history WHERE timestamp >= ? ORDER BY timestamp ASC",
+            conn, params=(cutoff,)
+        )
+        conn.close()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        return df
+    except:
+        return pd.DataFrame()
 
 def get_docker_snapshot(ip):
     try:
@@ -152,7 +193,12 @@ def encrypt_secret(val):
 st.title("📡 Aigentss Pulse | v2.0")
 
 # Tabs
-tab_live, tab_config, tab_history = st.tabs(["🚀 Status Live", "⚙️ Nucleus Config", "📜 History & Export"])
+tab_live, tab_graphs, tab_config, tab_history = st.tabs([
+    "🚀 Status Live", 
+    "📈 Graficas (Analytics)", 
+    "⚙️ Nucleus Config", 
+    "📜 History & Export"
+])
 
 # --- TAB 1: LIVE STATUS ---
 with tab_live:
@@ -175,7 +221,6 @@ with tab_live:
             with col:
                 # Bypass Mode visual
                 border_color = "#00ff00" if vps['status'] == 1 else "#ff0000"
-                glow = f"box-shadow: 0px 0px 15px {border_color};"
                 
                 with st.container(border=True):
                     # Header
@@ -226,7 +271,36 @@ with tab_live:
                         else:
                             st.info("No container metrics available.")
 
-# --- TAB 2: NUCLEUS CONFIG ---
+# --- TAB 2: GRAFICAS ---
+with tab_graphs:
+    st.header("📈 Rendimiento Histórico (24h)")
+    
+    df_hist = get_historical_metrics(hours=24)
+    if not df_hist.empty:
+        # User Selection for Filter
+        all_hosts = df_hist['name'].unique()
+        selected_hosts = st.multiselect("Filtrar VPS:", all_hosts, default=all_hosts)
+        
+        if selected_hosts:
+            df_filtered = df_hist[df_hist['name'].isin(selected_hosts)]
+            
+            st.subheader("⏱️ Latencia (ms)")
+            st.line_chart(df_filtered, x='timestamp', y='latency', color='name')
+            
+            st.subheader("💻 Uso de CPU (%)")
+            st.line_chart(df_filtered, x='timestamp', y='cpu', color='name')
+            
+            st.subheader("🧠 Uso de RAM (%)")
+            st.line_chart(df_filtered, x='timestamp', y='ram', color='name')
+            
+            st.subheader("💾 Uso de Disco (%)")
+            st.line_chart(df_filtered, x='timestamp', y='disk', color='name')
+        else:
+            st.info("Selecciona al menos un VPS para ver las gráficas.")
+    else:
+        st.info("Aún no hay datos históricos suficientes para graficar.")
+
+# --- TAB 3: NUCLEUS CONFIG ---
 with tab_config:
     st.header("🛠️ Nucleus Control Panel")
     
@@ -280,7 +354,7 @@ with tab_config:
             remove_vps(v['ip'])
             st.rerun()
 
-# --- TAB 3: HISTORY ---
+# --- TAB 4: HISTORY ---
 with tab_history:
     st.subheader("📊 Historical Data Export")
     
