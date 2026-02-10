@@ -427,6 +427,7 @@ def main():
                     vps_latest = db.get_latest_status(view_vps_ip)
                     if vps_latest and not df_docker.empty:
                         last_ts = df_docker['Time'].iloc[0]
+                        snap = df_docker[df_docker['Time'] == last_ts]
                         # Calculate Docker vs System ratios
                         total_docker_cpu = snap['CPU %'].sum()
                         total_docker_ram_gb = snap['Memory GB'].sum()
