@@ -263,6 +263,7 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
     try:
         # Get number of CPU cores for accurate percentage calculation
         num_cores = psutil.cpu_count(logical=True) or 4
+        logger.debug(f"Parsing container metrics with {num_cores} CPU cores detected")
         
         # Pre-parse labels and values
         for line in metrics_text.split('\n'):
@@ -325,29 +326,38 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                         if time_delta > 0.5:  # Sample frequency safety
                             # Check for container restart (negative delta)
                             if cpu_delta < 0:
-                                logger.info(f"Container {name} appears to have restarted, resetting cache")
-                                # Reset cache for this container
+                                logger.info(f"Container {name} restarted, resetting cache")
                                 host_cache[name] = (current_time, cpu_seconds)
                             elif cpu_delta >= 0:
-                                # CORRECTED FORMULA: (delta_seconds / (delta_time * num_cores)) * 100
-                                # This gives percentage of ONE core (0-100%)
-                                max_possible = time_delta * num_cores
-                                raw_pct = (cpu_delta / max_possible) * 100 if max_possible > 0 else 0.0
+                                # SIMPLIFIED FORMULA: CPU usage as percentage of ONE core
+                                # cpu_delta = seconds of CPU used in time_delta
+                                # Divide by time_delta to get "cores used"
+                                # Multiply by 100 to get percentage of ONE core
+                                cores_used = cpu_delta / time_delta
+                                raw_pct = cores_used * 100
                                 
-                                # Cap at 100% (one full core)
+                                logger.debug(f"Container {name}: cpu_delta={cpu_delta:.4f}s, time_delta={time_delta:.2f}s, cores_used={cores_used:.4f}, raw_pct={raw_pct:.2f}%")
+                                
+                                # ABSOLUTE CAP: Never exceed 100%
                                 cpu_pct = min(raw_pct, 100.0)
                                 cpu_pct = round(cpu_pct, 2)
+                                
+                                logger.debug(f"Container {name}: final cpu_pct={cpu_pct}%")
                     
                     # Store current for next cycle
                     host_cache[name] = (current_time, cpu_seconds)
                 
+                # CRITICAL: Apply absolute maximum cap to prevent ANY value > 100%
+                final_cpu = max(0.0, min(cpu_pct, 100.0))
+                
                 result.append({
                     'name': name,
-                    'cpu_percent': max(0.0, cpu_pct),
+                    'cpu_percent': final_cpu,
                     'memory_mb': round(mem_bytes / (1024 * 1024), 2),
                     'status': 'RUNNING'
                 })
         
+        logger.info(f"Parsed {len(result)} containers from {host}")
         return result
     
     except Exception as e:

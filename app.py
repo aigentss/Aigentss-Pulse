@@ -260,12 +260,13 @@ def main():
     st.caption("Spectre+ Branch - Infrastructure Observability Platform")
     
     # Navigation tabs - NO EMOJIS
-    tab_sec, tab1, tab2, tab3, tab4 = st.tabs([
+    tab_sec, tab1, tab2, tab3, tab4, tab_debug = st.tabs([
         "Security",
         "Status Live",
         "Analytics",
         "Nucleus Config",
-        "History & Export"
+        "History & Export",
+        "🔍 Debug/Raw Metrics"
     ])
 
     # ==================== TAB 0: SECURITY ====================
@@ -668,6 +669,100 @@ def main():
             )
         else:
             st.info("No historical data yet.")
+    
+    # ==================== TAB 5: DEBUG/RAW METRICS ====================
+    with tab_debug:
+        st.subheader("🔍 Debug & Raw Metrics Viewer")
+        st.caption("Test VPS connections and view raw metric values for troubleshooting")
+        
+        vps_list_debug = db.list_vps()
+        if not vps_list_debug:
+            st.warning("No VPS configured. Go to Nucleus Config to add VPS.")
+        else:
+            # VPS selector
+            vps_debug_options = {f"{vps['name']} ({vps['ip']})": vps for vps in vps_list_debug}
+            selected_debug_vps = st.selectbox("Select VPS to Test", options=list(vps_debug_options.keys()))
+            
+            if selected_debug_vps:
+                vps = vps_debug_options[selected_debug_vps]
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**VPS Configuration:**")
+                    st.json({
+                        "IP": vps['ip'],
+                        "Name": vps['name'],
+                        "Node Exporter Port": vps.get('port', 9100),
+                        "cAdvisor Port": vps.get('cadvisor_port', 8080),
+                        "Max CPU Cores": vps.get('max_cpu_cores', 4),
+                        "Max RAM GB": vps.get('max_ram_gb', 8.0),
+                        "Max Disk GB": vps.get('max_disk_gb', 100.0),
+                        "Enabled": vps.get('enabled') == 1
+                    })
+                
+                with col2:
+                    st.write("**Latest Database Entry:**")
+                    latest_db = db.get_latest_status(vps['ip'])
+                    if latest_db:
+                        st.json({
+                            "Status": latest_db.get('status'),
+                            "CPU %": latest_db.get('cpu_percent'),
+                            "RAM %": latest_db.get('ram_percent'),
+                            "Disk %": latest_db.get('disk_percent'),
+                            "Latency ms": latest_db.get('latency_ms'),
+                            "Timestamp": format_timestamp(latest_db['timestamp'])
+                        })
+                    else:
+                        st.info("No data in database yet")
+                
+                st.divider()
+                
+                # Test live scrape
+                if st.button("🔄 Test Live Scrape", use_container_width=True):
+                    with st.spinner("Scraping metrics..."):
+                        try:
+                            metrics = scrape_vps(
+                                host=vps['ip'],
+                                node_port=vps.get('port', 9100),
+                                cadvisor_port=vps.get('cadvisor_port', 8080),
+                                include_docker=True
+                            )
+                            
+                            st.success("✅ Scrape successful!")
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write("**System Metrics:**")
+                                st.json({
+                                    "Status": metrics.get('status'),
+                                    "Latency (ms)": metrics.get('latency_ms'),
+                                    "CPU %": metrics.get('cpu_percent'),
+                                    "RAM %": metrics.get('ram_percent'),
+                                    "Disk %": metrics.get('disk_percent')
+                                })
+                            
+                            with col2:
+                                st.write("**Docker Containers:**")
+                                containers = metrics.get('docker_containers', [])
+                                if containers:
+                                    st.write(f"Found {len(containers)} containers")
+                                    for c in containers[:10]:  # Show first 10
+                                        with st.expander(f"🐳 {c['name']}"):
+                                            st.write(f"**CPU:** {c.get('cpu_percent', 0):.2f}%")
+                                            st.write(f"**Memory:** {c.get('memory_mb', 0):.2f} MB")
+                                            st.write(f"**Status:** {c.get('status', 'UNKNOWN')}")
+                                else:
+                                    st.info("No Docker containers found")
+                            
+                            # Show full raw response
+                            with st.expander("📋 Full Metrics Object (JSON)"):
+                                st.json(metrics)
+                        
+                        except Exception as e:
+                            st.error(f"❌ Scrape failed: {str(e)}")
+                            st.exception(e)
 
     # Developer Signature - Bottom Center
     st.markdown("""
