@@ -86,6 +86,22 @@ def init_db() -> None:
             )
         """)
         
+        # Migration: Add hardware capacity columns (v3.1 enhancement)
+        try:
+            conn.execute("ALTER TABLE vps_inventory ADD COLUMN max_cpu_cores INTEGER DEFAULT 4")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        try:
+            conn.execute("ALTER TABLE vps_inventory ADD COLUMN max_ram_gb REAL DEFAULT 8.0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        try:
+            conn.execute("ALTER TABLE vps_inventory ADD COLUMN max_disk_gb REAL DEFAULT 100.0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
         # Configuration key-value store
         conn.execute("""
             CREATE TABLE IF NOT EXISTS config (
@@ -146,6 +162,14 @@ def save_status(vps_ip: str, vps_name: str, status: str, latency_ms: Optional[fl
                 cpu_percent: Optional[float] = None, ram_percent: Optional[float] = None, 
                 disk_percent: Optional[float] = None) -> bool:
     """Save system metrics snapshot to the system database."""
+    # Clamp metrics to valid ranges (0-100%)
+    if cpu_percent is not None:
+        cpu_percent = max(0.0, min(100.0, cpu_percent))
+    if ram_percent is not None:
+        ram_percent = max(0.0, min(100.0, ram_percent))
+    if disk_percent is not None:
+        disk_percent = max(0.0, min(100.0, disk_percent))
+    
     timestamp = int(time.time())
     with get_connection("system") as conn:
         cursor = conn.execute("""
@@ -247,11 +271,16 @@ def get_security_history(vps_ip: str, limit: int = 100) -> List[Dict[str, Any]]:
 
 # ========== INVENTORY & CONFIG & ALERTS (System DB) ==========
 
-def add_vps(ip: str, name: str, port: int = 9100, cadvisor_port: int = 8080) -> bool:
-    """Add VPS to inventory."""
+def add_vps(ip: str, name: str, port: int = 9100, cadvisor_port: int = 8080,
+            max_cpu_cores: Optional[int] = None, max_ram_gb: Optional[float] = None, 
+            max_disk_gb: Optional[float] = None) -> bool:
+    """Add VPS to inventory with optional hardware capacity limits."""
     with get_connection("system") as conn:
         try:
-            conn.execute("INSERT INTO vps_inventory (ip, name, port, cadvisor_port) VALUES (?, ?, ?, ?)", (ip, name, port, cadvisor_port))
+            conn.execute("""
+                INSERT INTO vps_inventory (ip, name, port, cadvisor_port, max_cpu_cores, max_ram_gb, max_disk_gb) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (ip, name, port, cadvisor_port, max_cpu_cores or 4, max_ram_gb or 8.0, max_disk_gb or 100.0))
             return True
         except sqlite3.IntegrityError: return False
 
@@ -267,6 +296,30 @@ def update_vps(ip: str, name: Optional[str] = None, enabled: Optional[bool] = No
     with get_connection("system") as conn:
         cursor = conn.execute(query, params)
         return cursor.rowcount > 0
+
+def update_vps_hardware(ip: str, max_cpu_cores: Optional[int] = None, 
+                       max_ram_gb: Optional[float] = None, 
+                       max_disk_gb: Optional[float] = None) -> bool:
+    """Update VPS hardware capacity limits."""
+    with get_connection("system") as conn:
+        updates = []
+        params = []
+        if max_cpu_cores is not None:
+            updates.append("max_cpu_cores = ?")
+            params.append(max_cpu_cores)
+        if max_ram_gb is not None:
+            updates.append("max_ram_gb = ?")
+            params.append(max_ram_gb)
+        if max_disk_gb is not None:
+            updates.append("max_disk_gb = ?")
+            params.append(max_disk_gb)
+        if updates:
+            updates.append("updated_at = ?")
+            params.append(int(time.time()))
+            sql = f"UPDATE vps_inventory SET {', '.join(updates)} WHERE ip = ?"
+            params.append(ip)
+            return conn.execute(sql, params).rowcount > 0
+        return False
 
 def remove_vps(ip: str) -> bool:
     """Delete VPS from inventory."""

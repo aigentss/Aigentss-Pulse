@@ -200,6 +200,21 @@ class MonitorDaemon:
             
             logger.debug(f"Scraping {name} ({ip})...")
             
+            # Gap Detection: Check if last status is stale
+            now = int(time.time())
+            last_status = db.get_latest_status(ip)
+            
+            if last_status and (now - last_status['timestamp'] > self._interval + 10):
+                logger.warning(f"Gap detected for {name}: {now - last_status['timestamp']}s since last update (threshold: {self._interval + 10}s)")
+                # Mark as DOWN due to gap
+                db.save_status(ip, name, 'DOWN')
+                # Trigger alert
+                try:
+                    import alert
+                    alert.check_and_alert(ip, name, 'DOWN')
+                except ImportError:
+                    pass
+            
             # Scrape metrics
             metrics = prometheus_metrics.scrape_vps(
                 host=ip,

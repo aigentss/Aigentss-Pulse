@@ -13,6 +13,7 @@ import time
 import logging
 import threading
 import httpx
+import psutil
 from typing import Dict, List, Optional, Any, Callable
 
 
@@ -144,7 +145,9 @@ def _parse_cpu_usage(metrics_text: str) -> Optional[float]:
             
             if total_seconds > 0:
                 idle_pct = (idle_seconds / total_seconds) * 100
-                return round(100 - idle_pct, 2)
+                cpu_usage = 100 - idle_pct
+                # Clamp to valid range
+                return round(max(0.0, min(100.0, cpu_usage)), 2)
         
         return None
     except Exception as e:
@@ -166,7 +169,8 @@ def _parse_memory_usage(metrics_text: str) -> Optional[float]:
             
             if total > 0:
                 used_pct = ((total - available) / total) * 100
-                return round(used_pct, 2)
+                # Clamp to valid range
+                return round(max(0.0, min(100.0, used_pct)), 2)
         
         return None
     except Exception as e:
@@ -194,7 +198,8 @@ def _parse_disk_usage(metrics_text: str) -> Optional[float]:
             
             if size > 0:
                 used_pct = ((size - avail) / size) * 100
-                return round(used_pct, 2)
+                # Clamp to valid range
+                return round(max(0.0, min(100.0, used_pct)), 2)
         
         return None
     except Exception as e:
@@ -256,6 +261,9 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
     current_time = time.time()
     
     try:
+        # Get number of CPU cores for accurate percentage calculation
+        num_cores = psutil.cpu_count(logical=True) or 4
+        
         # Pre-parse labels and values
         for line in metrics_text.split('\n'):
             if not line or line.startswith('#'):
@@ -314,18 +322,21 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                         time_delta = current_time - prev_time
                         cpu_delta = cpu_seconds - prev_cpu
                         
-                        if time_delta > 0.5: # Sample frequency safety
-                            # Check for overflow/reset (if cpu_delta is negative, skip)
-                            if cpu_delta >= 0:
-                                # Standard formula: (delta_seconds / delta_time) * 100
-                                raw_pct = (cpu_delta / time_delta) * 100
+                        if time_delta > 0.5:  # Sample frequency safety
+                            # Check for container restart (negative delta)
+                            if cpu_delta < 0:
+                                logger.info(f"Container {name} appears to have restarted, resetting cache")
+                                # Reset cache for this container
+                                host_cache[name] = (current_time, cpu_seconds)
+                            elif cpu_delta >= 0:
+                                # CORRECTED FORMULA: (delta_seconds / (delta_time * num_cores)) * 100
+                                # This gives percentage of ONE core (0-100%)
+                                max_possible = time_delta * num_cores
+                                raw_pct = (cpu_delta / max_possible) * 100 if max_possible > 0 else 0.0
                                 
-                                # Safety cap: unlikely to exceed 100% * cores (usually 4-8 cores)
-                                # If it exceeds 1000%, something is wrong with units or double accounting
-                                if raw_pct > 1000:
-                                    cpu_pct = 100.0 # Realistic fallback
-                                else:
-                                    cpu_pct = round(raw_pct, 2)
+                                # Cap at 100% (one full core)
+                                cpu_pct = min(raw_pct, 100.0)
+                                cpu_pct = round(cpu_pct, 2)
                     
                     # Store current for next cycle
                     host_cache[name] = (current_time, cpu_seconds)

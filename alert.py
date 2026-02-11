@@ -10,6 +10,8 @@ Generates 24-hour visual intelligence graphs for email notifications.
 
 import hashlib
 import json
+import logging
+import time
 from io import BytesIO
 from typing import Optional, Tuple, List, Dict, Any
 import matplotlib

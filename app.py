@@ -472,9 +472,11 @@ def main():
         with col1:
             vps_list_all = db.list_vps()
             vps_options = {vps['name']: vps['ip'] for vps in vps_list_all}
-            selected_vps = st.multiselect("Select VPS", options=list(vps_options.keys()), default=list(vps_options.keys())[:3] if vps_options else [])
+            # Default to ALL VPS selected
+            selected_vps = st.multiselect("Select VPS", options=list(vps_options.keys()), default=list(vps_options.keys()))
         with col2:
-            metric_type = st.selectbox("Metric Type", options=["CPU %", "RAM %", "Disk %", "Latency (ms)"])
+            # Default metric is Latency
+            metric_type = st.selectbox("Metric Type", options=["Latency (ms)", "CPU %", "RAM %", "Disk %"], index=0)
         with col3:
             time_range = st.selectbox("Time Range", options=["Last 6 Hours", "Last 24 Hours", "Last 7 Days", "Last 30 Days"])
         
@@ -486,25 +488,33 @@ def main():
             for vps_name in selected_vps:
                 history = db.get_history(vps_ip=vps_options[vps_name], start_time=start_time, limit=5000)
                 for record in history:
-                    val = record['cpu_percent'] if metric_type == "CPU %" else record['ram_percent'] if metric_type == "RAM %" else record['disk_percent'] if metric_type == "Disk %" else record['latency_ms']
+                    val = record['latency_ms'] if metric_type == "Latency (ms)" else record['cpu_percent'] if metric_type == "CPU %" else record['ram_percent'] if metric_type == "RAM %" else record['disk_percent']
                     if val is not None: chart_data.append({'Time': datetime.fromtimestamp(record['timestamp']), 'VPS': vps_name, metric_type: val})
             
             if chart_data:
                 df = pd.DataFrame(chart_data)
-                st.line_chart(df.pivot(index='Time', columns='VPS', values=metric_type), height=400)
+                st.line_chart(df.pivot(index='Time', columns='VPS',values=metric_type), height=400)
                 
-                # Summary statistics
-                st.subheader("Summary Statistics")
+                # Summary statistics with units
+                st.subheader("📈 Summary Statistics")
+                st.caption("🔹 CPU %, RAM %, and Disk % are expressed as percentages (0-100%). 📊 Latency is in milliseconds.")
+                
                 summary_cols = st.columns(len(selected_vps))
                 
                 for i, vps_name in enumerate(selected_vps):
                     with summary_cols[i]:
                         vps_data = df[df['VPS'] == vps_name][metric_type]
                         if not vps_data.empty:
+                            # Add units based on metric type
+                            if metric_type == "Latency (ms)":
+                                unit = " ms"
+                            else:
+                                unit = "%"
+                            
                             st.metric(
                                 label=vps_name,
-                                value=f"{vps_data.mean():.2f}",
-                                delta=f"Max: {vps_data.max():.2f}"
+                                value=f"{vps_data.mean():.2f}{unit}",
+                                delta=f"Max: {vps_data.max():.2f}{unit}"
                             )
             else: st.info("No data available for selected filters.")
         else: st.info("Select at least one VPS to view analytics.")
@@ -560,15 +570,59 @@ def main():
         vps_inv = db.list_vps()
         if vps_inv:
             st.write(f"**Total VPS:** {len(vps_inv)}")
+            st.write("**Hardware Configuration**")
+            st.caption("Set maximum hardware capacity for each VPS to enable overshoot detection")
+            
             for v in vps_inv:
-                c1, c2, c3 = st.columns([3, 1, 1])
-                c1.write(f"**{v['name']}** ({v['ip']})")
-                if c2.checkbox("Active", v['enabled'] == 1, key=f"v_{v['ip']}"): 
-                    if not (v['enabled'] == 1): db.update_vps(v['ip'], enabled=True)
-                else: 
-                    if (v['enabled'] == 1): db.update_vps(v['ip'], enabled=False)
-                if c3.button("🗑️", key=f"r_{v['ip']}"): 
-                    db.remove_vps(v['ip']); st.success(f"Removed {v['name']}"); st.rerun()
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([2, 2, 1])
+                    
+                    with c1:
+                        st.write(f"**{v['name']}** ({v['ip']})")
+                        enable_key = f"enable_{v['ip']}"
+                        is_enabled = st.checkbox("Active", v['enabled'] == 1, key=enable_key)
+                        if is_enabled != (v['enabled'] == 1):
+                            db.update_vps(v['ip'], enabled=is_enabled)
+                    
+                    with c2:
+                        hw_cols = st.columns(3)
+                        with hw_cols[0]:
+                            cpu_cores = st.number_input(
+                                "Max CPU Cores", 
+                                min_value=1, 
+                                max_value=128, 
+                                value=int(v.get('max_cpu_cores') or 4),
+                                key=f"cpu_{v['ip']}"
+                            )
+                        with hw_cols[1]:
+                            ram_gb = st.number_input(
+                                "Max RAM (GB)", 
+                                min_value=0.5, 
+                                max_value=1024.0, 
+                                value=float(v.get('max_ram_gb') or 8.0),
+                                step=0.5,
+                                key=f"ram_{v['ip']}"
+                            )
+                        with hw_cols[2]:
+                            disk_gb = st.number_input(
+                                "Max Disk (GB)", 
+                                min_value=1.0, 
+                                max_value=10000.0, 
+                                value=float(v.get('max_disk_gb') or 100.0),
+                                step=1.0,
+                                key=f"disk_{v['ip']}"
+                            )
+                    
+                    with c3:
+                        if st.button("💾 Update HW", key=f"save_hw_{v['ip']}", use_container_width=True):
+                            db.update_vps_hardware(v['ip'], cpu_cores, ram_gb, disk_gb)
+                            st.success("Updated!")
+                            st.rerun()
+                        
+                        if st.button("🗑️ Remove", key=f"r_{v['ip']}", use_container_width=True): 
+                            db.remove_vps(v['ip'])
+                            st.success(f"Removed {v['name']}")
+                            st.rerun()
         else:
             st.info("No VPS configured yet.")
     
@@ -632,15 +686,40 @@ def render_vps_card(vps: dict) -> str:
     ram = (latest.get('ram_percent') or 0.0) if latest else 0.0
     disk = (latest.get('disk_percent') or 0.0) if latest else 0.0
     
-    docker_containers = db.get_latest_docker_snapshot(vps['ip']) or []
-    card_class = "status-card-up" if status == "UP" else "status-card-down"
+    # Get hardware limits
+    max_cpu_cores = vps.get('max_cpu_cores') or 4
+    max_ram_gb = vps.get('max_ram_gb') or 8.0
+    max_disk_gb = vps.get('max_disk_gb') or 100.0
     
+    # Detect overshoot (metrics > 100%)
+    is_overshoot = (cpu > 100) or (ram > 100) or (disk > 100)
+    
+    # Detect gap (stale data)
+    now = int(time.time())
+    daemon = get_monitor_daemon()
+    interval = daemon.get_status()['interval']
+    is_stale = latest and (now - latest['timestamp']) > (interval + 10)
+    
+    # Determine card class
+    if status == 'DOWN' or is_overshoot or is_stale:
+        card_class = "status-card-down"
+    else:
+        card_class = "status-card-up"
+    
+    docker_containers = db.get_latest_docker_snapshot(vps['ip']) or []
     docker_html = f"<div style='margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); padding-top:5px;'><small>🐳 Docker: {len(docker_containers)} conts</small></div>" if docker_containers else ""
+    
+    # Add overshoot or stale warning badge
+    warning_badge = ""
+    if is_overshoot:
+        warning_badge = '<span class="metric-badge badge-danger">⚠️ OVERSHOOT</span>'
+    elif is_stale:
+        warning_badge = '<span class="metric-badge badge-danger">⚠️ STALE DATA</span>'
     
     return f"""
     <div class="{card_class}">
         <h3 style="margin: 0;">{vps['name']}</h3>
-        <p style="font-family: monospace; margin:0;">{vps['ip']} {get_status_badge(status)}</p>
+        <p style="font-family: monospace; margin:0;">{vps['ip']} {get_status_badge(status)} {warning_badge}</p>
         <div style="margin-top:10px; font-size:14px;">
             ⚡ {latency:.1f}ms | 💻 {cpu:.1f}% | 🧠 {ram:.1f}% | 💾 {disk:.1f}%
         </div>
@@ -661,6 +740,13 @@ def render_security_card(vps: dict) -> str:
     f2b_status = latest.get("fail2ban", "unknown")
     f2b_badge = '<span class="metric-badge badge-success">F2B</span>' if f2b_status == "running" else '<span class="metric-badge badge-danger">F2B</span>'
     
+    selinux_status = latest.get("selinux", "unknown")
+    selinux_badge = '<span class="metric-badge badge-success">SELinux</span>' if selinux_status == "enforcing" else '<span class="metric-badge badge-danger">SELinux</span>'
+    
+    # Detect security issues
+    is_insecure = (fw_status != "active") or (f2b_status != "running") or (selinux_status != "enforcing")
+    card_class = "status-card-down" if is_insecure else "status-card-sec"
+    
     ports = latest.get("open_ports", [])
     ports_preview = ", ".join([str(p['port']) for p in ports[:4]])
     if len(ports) > 4: ports_preview += "..."
@@ -670,9 +756,9 @@ def render_security_card(vps: dict) -> str:
     total_rx = sum(p.get('rx_kbps', 0) for p in active)
     
     return f"""
-    <div class="status-card-sec">
+    <div class="{card_class}">
         <h3 style="margin: 0; color: #00d4ff;">{vps['name']}</h3>
-        <p style="margin: 5px 0;">{fw_badge} {f2b_badge}</p>
+        <p style="margin: 5px 0;">{fw_badge} {f2b_badge} {selinux_badge}</p>
         <div class="port-metric">
             🔓 Open Ports: {ports_preview or 'None'}<br>
             🌐 Active Load: {total_rx:.1f} KB/s
