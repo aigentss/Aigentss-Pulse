@@ -4,7 +4,10 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Utility to clear Streamlit cache and pycache files.
+Maintenance Utility.
+
+ARCHITECTURAL DECISION:
+- Clears Streamlit internal cache and compiled byte-code to resolve 'stale state' issues during updates.
 """
 
 #!/usr/bin/env python3

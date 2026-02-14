@@ -4,7 +4,12 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Prometheus metrics scraper. Fetches and parses data from Node Exporter and cAdvisor with robust regex logic.
+Scraping Logic for Prometheus Endpoints.
+
+ARCHITECTURAL DECISION:
+- Custom parser instead of `prometheus_client` library to handle specific 'cAdvisor' format inconsistencies (spaces, timestamps).
+- Enforces strict regex validation `r'\s+([\d.eE+-]+)(?:\s+\d+)?$'` to reject corrupt data.
+- Applies immediate sanity checks (CPU > N*100%, RAM > 128GB) at the ingestion layer.
 """
 
 import socket

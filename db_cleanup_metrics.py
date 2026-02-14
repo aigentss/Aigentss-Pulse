@@ -4,7 +4,11 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Database maintenance utility. Detects and removes corrupt data or impossible outliers.
+Data Sanitation & Auto-Healing Utility.
+
+ARCHITECTURAL DECISION:
+- Aggressively deletes records violating physical constraints (Latency > 5000ms, CPU > 100%).
+- Hardcoded fixes for known '1.6TB Memory' cAdvisor bugs.
 """
 
 import sqlite3

@@ -4,7 +4,12 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Elite UI/UX for Infrastructure Observability. Provides dual themes, real-time metrics, and Docker container sub-dashboards.
+Entry point for the Streamlit Dashboard. 
+
+ARCHITECTURAL DECISION:
+- Uses Streamlit for rapid UI development with 'Infinity' (Dark) and 'Daywalker' (Light) themes.
+- Implements direct DB polling for real-time status to avoid complex websocket infrastructure.
+- Forces Altair charts with [0, 100] Y-axis domain to prevent visual distortion from outliers.
 """
 
 import streamlit as st

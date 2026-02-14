@@ -4,7 +4,11 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Notification Service. Handles SMTP connections, email composition, and attachment encryption/decryption.
+SMTP Notification Service.
+
+ARCHITECTURAL DECISION:
+- Uses Fernet symmetric encryption (AES-256) for storing SMTP credentials in `.env` vs plain text.
+- Reuses SMTP connections where possible but handles timeouts gracefully.
 """
 
 import os

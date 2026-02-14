@@ -4,7 +4,11 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Report Scheduler (APScheduler). Generates and sends weekly/monthly performance PDF/PNG reports.
+Scheduled Reporting Module.
+
+ARCHITECTURAL DECISION:
+- Uses `APScheduler` for weekly/monthly jobs independent of user interaction.
+- Generates static PDF/PNG snapshots of performance to provide long-term trend analysis for stakeholders.
 """
 
 import logging

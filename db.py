@@ -4,7 +4,12 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Database Abstraction Layer (SQLite + WAL). Handles all persistence for system metrics, Docker snapshots, and config.
+Database Persistence Layer.
+
+ARCHITECTURAL DECISION:
+- Uses SQLite with WAL (Write-Ahead Logging) mode enabled for high concurrency.
+- Splits data into `aigents_pulse.db` (System) and `aigents_dockers_vps.db` (Docker) to reduce lock contention during massive writes.
+- Implements idempotent table creation to ensure zero-config deployment.
 """
 
 import sqlite3

@@ -4,7 +4,11 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Alert Engine. Checks for UP/DOWN state transitions and sends HTML emails with embedded PNG graphs.
+Alerting Engine.
+
+ARCHITECTURAL DECISION:
+- State-based triggering: Checks for transitions (UP -> DOWN) rather than continuous failed states to reduce alert fatigue.
+- Embeds visual evidence (PNG graphs) directly in emails using Matplotlib backend to provide immediate context without logging in.
 """
 
 import hashlib

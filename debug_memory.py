@@ -4,7 +4,10 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Debug script to analyze memory usage of the application.
+Memory Profiling Tool.
+
+ARCHITECTURAL DECISION:
+- Uses `psutil` to track the self-consumption of the monitoring agent to ensure it doesn't become the problem it is trying to monitor.
 """
 
 #!/usr/bin/env python3

@@ -4,7 +4,10 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Simple heartbeat signal generator for external health checks.
+Heartbeat Generator.
+
+ARCHITECTURAL DECISION:
+- Minimalist script to signal 'I am alive' to external watchdogs.
 """
 
 import psutil

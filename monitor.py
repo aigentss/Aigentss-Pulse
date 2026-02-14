@@ -4,7 +4,12 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Singleton Monitoring Daemon that periodically scrapes metrics from all enabled VPS using a thread pool.
+Central Monitoring Daemon (Singleton).
+
+ARCHITECTURAL DECISION:
+- Runs as a background thread within the main process to simplify deployment (no separate worker process needed).
+- Uses a ThreadPoolExecutor to scrape multiple VPS nodes concurrently (`max_workers=32`).
+- Implements 'Auto-Healing' by triggering `db_cleanup_metrics.deep_clean()` on startup and error spikes.
 """
 
 import threading

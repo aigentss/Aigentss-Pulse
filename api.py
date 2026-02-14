@@ -4,7 +4,11 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-REST API for Aigents Pulse. Provides endpoints for VPS inventory and metrics.
+REST API Interface using FastAPI.
+
+ARCHITECTURAL DECISION:
+- Decoupled from the UI to allow external integrations (e.g., mobile apps, 3rd party dashboards).
+- Read-only access to `aigents_pulse.db` to prevent write contention with the Monitor Daemon.
 """
 
 from fastapi import FastAPI, HTTPException, Depends
