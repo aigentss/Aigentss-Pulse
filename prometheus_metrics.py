@@ -316,8 +316,11 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 if value > containers_by_id[container_id]['cpu_seconds']:
                     containers_by_id[container_id]['cpu_seconds'] = value
             elif is_mem:
+                # DEBUG: Log memory values being parsed
+                logger.debug(f"Memory metric for {name} ({container_id[:12]}): {value} bytes")
                 # Only update if this is a higher value
                 if value > containers_by_id[container_id]['memory_bytes']:
+                    logger.debug(f"  → Updating container memory from {containers_by_id[container_id]['memory_bytes']} to {value} bytes")
                     containers_by_id[container_id]['memory_bytes'] = value
         
         logger.debug(f"Found {len(containers_by_id)} unique containers")
@@ -370,6 +373,7 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 
                 # Convert memory to MB
                 memory_mb = round(mem_bytes / (1024 * 1024), 2)
+                logger.debug(f"{name} final: {mem_bytes} bytes → {memory_mb} MB")
                 
                 result.append({
                     'name': name,
