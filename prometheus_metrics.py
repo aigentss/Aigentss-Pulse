@@ -266,7 +266,7 @@ def _parse_disk_usage(metrics_text: str) -> Optional[float]:
 
 # ========== CADVISOR SCRAPING (DOCKER METRICS) ==========
 
-def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5) -> Optional[List[Dict[str, Any]]]:
+def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: int = 1) -> Optional[List[Dict[str, Any]]]:
     """
     Scrape Docker container metrics from cAdvisor.
     
@@ -274,14 +274,14 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5) -> Optional[L
         host: IP address of the VPS
         port: cAdvisor port (default 8080)
         timeout: HTTP timeout in seconds
+        num_cores: Number of CPU cores on the host (for % calc)
         
     Returns:
         List of container metrics: [
             {
                 'name': str,
                 'cpu_percent': float,
-                'memory_mb': float,
-                'memory_limit_mb': float
+                'memory_mb': float
             },
             ...
         ]
@@ -299,7 +299,7 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5) -> Optional[L
             response.raise_for_status()
             
             metrics_text = response.text
-            return _parse_container_metrics(metrics_text, host)
+            return _parse_container_metrics(metrics_text, host, num_cores)
     
     return retry_with_backoff(_fetch, max_attempts=2, base_delay=1.0)
 
@@ -309,17 +309,23 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5) -> Optional[L
 _DOCKER_CPU_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
-def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any]]:
+def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -> List[Dict[str, Any]]:
     """
-    Parse cAdvisor metrics with correct per-container isolation.
-    CRITICAL FIX: Uses container ID as unique key to avoid aggregating system totals.
+    Parse cAdvisor metrics with correct per-container isolation and CPU rate calculation.
+    
+    Args:
+        metrics_text: Raw Prometheus metrics
+        host: Host IP (for caching state)
+        num_cores: Total CPU cores on the host (CRITICAL for correct %)
     """
     containers_by_id = {}  # Use ID as key to ensure uniqueness
     current_time = time.time()
     
+    # Ensure at least 1 core to avoid division by zero
+    num_cores = max(1, num_cores)
+    
     try:
-        num_cores = psutil.cpu_count(logical=True) or 4
-        logger.debug(f"Parsing container metrics with {num_cores} CPU cores detected")
+        logger.debug(f"Parsing container metrics for {host} using {num_cores} cores")
         
         # FIRST PASS: Parse all metric lines and store by container ID
         for line in metrics_text.split('\n'):
@@ -329,7 +335,7 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
             # Only process container CPU and memory metrics
             # CRITICAL: Use the correct metric names that cAdvisor actually exports
             is_cpu = 'container_cpu_usage_seconds_total{' in line
-            is_mem = 'container_memory_usage_bytes{' in line  # Changed from working_set to usage
+            is_mem = 'container_memory_usage_bytes{' in line
             
             if not (is_cpu or is_mem):
                 continue
@@ -348,12 +354,32 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 continue
             
             # For CPU metrics, ONLY accept the aggregate with cpu="total"
-            # Reject per-core breakdowns (cpu="0", cpu="1", etc.)
             if is_cpu:
                 cpu_label = labels.get('cpu', '')
                 if cpu_label != 'total':
-                    # Skip individual core metrics
                     continue
+            
+            # CRITICAL FIX: Memory metric selection
+            if is_mem:
+                # Count how many labels this line has (simple heuristic: fewer labels = more aggregate)
+                # The aggregate memory metric should have id, name, image and container_label_* only
+                num_labels = len(labels)
+                
+                # If we already have a memory value for this container, check if this new line is "better"
+                # "Better" means it has fewer labels (is more aggregate)
+                if container_id in containers_by_id:
+                    current_entry = containers_by_id[container_id]
+                    # We store the label count in the dict to compare
+                    current_label_count = current_entry.get('_label_count', 999)
+                    
+                    if num_labels >= current_label_count:
+                        # New line has more or equal labels -> likely more specific or duplicate -> skip
+                        continue
+                    else:
+                        # New line has FEWER labels -> it is the aggregate we want -> overwrite
+                        pass
+            else:
+                num_labels = 999 # Default for non-memory metrics
             
             # Parse the metric value
             try:
@@ -362,26 +388,6 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 logger.warning(f"Could not parse value from line: {line[:100]}")
                 continue
             
-            # CRITICAL FIX: For memory metrics, cAdvisor reports multiple lines per container
-            # with different label combinations. We MUST select ONLY the aggregate line
-            # that contains minimal labels (just id, name, image, container_label_*)
-            # The aggregate line will be the one WITHOUT extra dimensions like "endpoint", "namespace", etc.
-            if is_mem:
-                # Count how many labels this line has (simple heuristic: fewer labels = more aggregate)
-                # The aggregate memory metric should have id, name, image and container_label_* only
-                num_labels = len(labels)
-                
-                # If this container already has a memory value AND this new value has MORE labels,
-                # skip it (we want the most aggregate value, which has fewer labels)
-                if container_id in containers_by_id:
-                    existing_mem = containers_by_id[container_id].get('memory_bytes', 0)
-                    # Only update if this value is different and we haven't stored a good value yet
-                    # OR if this is a larger value (which means it's likely the aggregate)
-                    if existing_mem == 0 or value < existing_mem:
-                        # If new value is smaller, it's likely more specific, so skip
-                        logger.debug(f"Skipping memory metric for {name} - already have aggregate value")
-                        continue
-            
             # Initialize container entry if needed
             if container_id not in containers_by_id:
                 containers_by_id[container_id] = {
@@ -389,25 +395,19 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                     'name': name,
                     'image': image,
                     'cpu_seconds': 0.0,
-                    'memory_bytes': 0.0
+                    'memory_bytes': 0.0,
+                    '_label_count': 999  # Initialize with high count
                 }
             
             # Store the metric value
             if is_cpu:
-                # Only update if this is a higher value (handles duplicate lines)
                 if value > containers_by_id[container_id]['cpu_seconds']:
                     containers_by_id[container_id]['cpu_seconds'] = value
             elif is_mem:
-                # DEBUG: Log memory values being parsed
-                logger.debug(f"Memory metric for {name} ({container_id[:12]}): {value} bytes")
-                # For memory, take the FIRST value we see (should be the aggregate)
-                if containers_by_id[container_id]['memory_bytes'] == 0:
-                    logger.debug(f"  → Setting container memory to {value} bytes")
-                    containers_by_id[container_id]['memory_bytes'] = value
-                else:
-                    logger.debug(f"  → Skipping (already have {containers_by_id[container_id]['memory_bytes']} bytes)")
-        
-        logger.debug(f"Found {len(containers_by_id)} unique containers")
+                # Update memory value and label count (we already filtered above)
+                containers_by_id[container_id]['memory_bytes'] = value
+                containers_by_id[container_id]['_label_count'] = num_labels
+                logger.debug(f"Updated memory for {name}: {value} bytes (labels={num_labels})")
         
         # SECOND PASS: Calculate CPU percentages using cache
         with _CACHE_LOCK:
@@ -425,39 +425,37 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 
                 # Calculate CPU percentage
                 if cpu_seconds > 0:
-                    cache_key = f"{name}_{container_id}"  # Unique key per container
+                    cache_key = f"{name}_{container_id}"
                     
                     if cache_key in host_cache:
                         prev_time, prev_cpu = host_cache[cache_key]
                         time_delta = current_time - prev_time
                         cpu_delta = cpu_seconds - prev_cpu
                         
-                        if time_delta > 0.5:  # Minimum sample interval
+                        if time_delta > 0.5:
                             if cpu_delta < 0:
                                 # Container restarted
-                                logger.info(f"Container {name} ({container_id[:12]}) restarted")
                                 host_cache[cache_key] = (current_time, cpu_seconds)
                             elif cpu_delta >= 0:
-                                # Calculate CPU usage as percentage of ONE core
-                                # cpu_delta is in seconds, time_delta is also in seconds
-                                # cores_used = cpu_delta / time_delta
-                                # For single-core representation: percentage = cores_used * 100
+                                # FORMULA: (Delta CPU Seconds / (Delta Time * Cores)) * 100
+                                # This gives % of TOTAL HOST CPU capacity specific to this container
                                 cores_used = cpu_delta / time_delta
-                                raw_pct = cores_used * 100.0
                                 
-                                # Cap at 100% (full utilization of one core)
+                                # pct relative to total host capacity (all cores)
+                                # Example: using 2 cores on a 4 core machine = 50%
+                                raw_pct = (cores_used / num_cores) * 100.0
+                                
+                                # Cap at 100% * num_cores (if displaying per-core load) or 100% total
+                                # Here we want % of TOTAL SYSTEM resources, so 100% is max
                                 cpu_pct = min(raw_pct, 100.0)
-                                cpu_pct = max(0.0, cpu_pct)  # Ensure non-negative
+                                cpu_pct = max(0.0, cpu_pct)
                                 cpu_pct = round(cpu_pct, 2)
-                                
-                                logger.debug(f"{name}: cpu_delta={cpu_delta:.4f}s, time_delta={time_delta:.2f}s, final={cpu_pct}%")
                     
-                    # Update cache for next cycle
+                    # Update cache
                     host_cache[cache_key] = (current_time, cpu_seconds)
                 
-                # Convert memory to MB
+                # Convert memory to MB (Bytes -> MB)
                 memory_mb = round(mem_bytes / (1024 * 1024), 2)
-                logger.debug(f"{name} final: {mem_bytes} bytes → {memory_mb} MB")
                 
                 result.append({
                     'name': name,
@@ -466,7 +464,6 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                     'status': 'RUNNING'
                 })
         
-        logger.info(f"Parsed {len(result)} containers from {host}")
         return result
     
     except Exception as e:
@@ -538,7 +535,13 @@ def scrape_vps(
     
     # Get Docker metrics if requested and system is UP
     if include_docker and system_metrics['status'] == 'UP':
-        docker_metrics = scrape_cadvisor(host, cadvisor_port)
+        # Use detected CPU cores for accurate container % calculation
+        # If detection failed, default to 1 to avoid division by zero (though handled in parser)
+        num_cores = 1
+        if 'hardware' in system_metrics and 'cpu_cores' in system_metrics['hardware']:
+            num_cores = system_metrics['hardware']['cpu_cores']
+            
+        docker_metrics = scrape_cadvisor(host, cadvisor_port, timeout=5, num_cores=num_cores)
         result['docker_containers'] = docker_metrics if docker_metrics else []
     else:
         result['docker_containers'] = []
