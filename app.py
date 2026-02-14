@@ -729,6 +729,18 @@ def main():
                                 include_docker=True
                             )
                             
+                            # Auto-update hardware on manual scrape too
+                            if metrics.get('hardware'):
+                                hw = metrics['hardware']
+                                if hw.get('cpu_cores') or hw.get('ram_gb') or hw.get('disk_gb'):
+                                    db.update_vps_hardware(
+                                        vps['ip'], 
+                                        max_cpu_cores=hw.get('cpu_cores'),
+                                        max_ram_gb=hw.get('ram_gb'),
+                                        max_disk_gb=hw.get('disk_gb')
+                                    )
+                                    st.toast(f"Updated hardware info: {hw}")
+                            
                             st.success("✅ Scrape successful!")
                             
                             col1, col2 = st.columns(2)

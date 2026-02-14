@@ -234,6 +234,19 @@ class MonitorDaemon:
                 disk_percent=metrics.get('disk_percent')
             )
             
+            # AUTOMATIC HARDWARE SYNC: Update VPS capacity if detected
+            # This fixes the issue where default 4 cores / 8GB RAM are used for calculations
+            if metrics.get('hardware'):
+                hw = metrics['hardware']
+                if hw.get('cpu_cores') or hw.get('ram_gb') or hw.get('disk_gb'):
+                    db.update_vps_hardware(
+                        ip, 
+                        max_cpu_cores=hw.get('cpu_cores'),
+                        max_ram_gb=hw.get('ram_gb'),
+                        max_disk_gb=hw.get('disk_gb')
+                    )
+                    logger.info(f"Updated HW for {name}: {hw}")
+            
             # Save Docker snapshot if available
             if metrics.get('docker_containers'):
                 db.save_docker_snapshot(ip, metrics['docker_containers'])

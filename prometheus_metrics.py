@@ -69,6 +69,58 @@ def retry_with_backoff(func, max_attempts: int = 3, base_delay: float = 1.0):
                 return None
 
 
+# ========== HARDWARE DETECTION ==========
+
+def _parse_hardware_info(metrics_text: str) -> Dict[str, Any]:
+    """
+    Extract hardware specifications from Node Exporter metrics.
+    Returns:
+        {
+            'cpu_cores': int,
+            'ram_gb': float,
+            'disk_gb': float
+        }
+    """
+    info = {}
+    try:
+        import re
+        
+        # 1. Detect CPU Cores (count unique 'cpu' labels)
+        # metric: node_cpu_seconds_total{cpu="0",mode="idle"}
+        cpu_matches = re.findall(r'node_cpu_seconds_total\{[^}]*cpu="(\d+)"', metrics_text)
+        if cpu_matches:
+            # Count unique CPU IDs
+            unique_cpus = set(cpu_matches)
+            info['cpu_cores'] = len(unique_cpus)
+        else:
+            # Fallback for some node_exporter versions
+            core_match = re.search(r'machine_cpu_cores\s+(\d+)', metrics_text)
+            if core_match:
+                info['cpu_cores'] = int(core_match.group(1))
+
+        # 2. Detect Total RAM
+        # metric: node_memory_MemTotal_bytes 2.5123e+10
+        mem_match = re.search(r'node_memory_MemTotal_bytes\s+([\d.e+]+)', metrics_text)
+        if mem_match:
+            bytes_val = float(mem_match.group(1))
+            info['ram_gb'] = round(bytes_val / (1024**3), 2)  # Convert to GB
+            
+        # 3. Detect Total Disk (Root)
+        # metric: node_filesystem_size_bytes{mountpoint="/"} 
+        disk_match = re.search(r'node_filesystem_size_bytes\{[^}]*mountpoint="/"[^}]*\}\s+([\d.e+]+)', metrics_text)
+        if not disk_match:
+             disk_match = re.search(r'node_filesystem_size_bytes\{[^}]*fstype="ext4"[^}]*\}\s+([\d.e+]+)', metrics_text)
+             
+        if disk_match:
+            bytes_val = float(disk_match.group(1))
+            info['disk_gb'] = round(bytes_val / (1024**3), 2) # Convert to GB
+            
+    except Exception as e:
+        logger.warning(f"Hardware detection error: {e}")
+    
+    return info
+
+
 # ========== NODE EXPORTER SCRAPING ==========
 
 def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 5) -> Optional[Dict[str, Any]]:
@@ -86,7 +138,8 @@ def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 5) -> Optio
             'latency_ms': float,
             'cpu_percent': float,
             'ram_percent': float,
-            'disk_percent': float
+            'disk_percent': float,
+            'hardware': { ... }  # Added hardware info
         }
     """
     # Stealth check
@@ -115,12 +168,16 @@ def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 5) -> Optio
             ram_percent = _parse_memory_usage(metrics_text)
             disk_percent = _parse_disk_usage(metrics_text)
             
+            # Detect hardware info
+            hardware = _parse_hardware_info(metrics_text)
+            
             return {
                 'status': 'UP',
                 'latency_ms': round(latency_ms, 2),
                 'cpu_percent': cpu_percent,
                 'ram_percent': ram_percent,
-                'disk_percent': disk_percent
+                'disk_percent': disk_percent,
+                'hardware': hardware
             }
     
     return retry_with_backoff(_fetch, max_attempts=3, base_delay=1.0)
