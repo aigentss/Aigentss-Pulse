@@ -270,8 +270,9 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 continue
             
             # Only process container CPU and memory metrics
+            # CRITICAL: Use the correct metric names that cAdvisor actually exports
             is_cpu = 'container_cpu_usage_seconds_total{' in line
-            is_mem = 'container_memory_working_set_bytes{' in line
+            is_mem = 'container_memory_usage_bytes{' in line  # Changed from working_set to usage
             
             if not (is_cpu or is_mem):
                 continue
@@ -289,9 +290,13 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
             if not name or name in ['/', 'POD'] or not image or not container_id:
                 continue
             
-            # For CPU metrics, skip per-core breakdowns (only aggregate)
-            if is_cpu and 'cpu=' in line and 'cpu="total"' not in line:
-                continue
+            # For CPU metrics, ONLY accept the aggregate with cpu="total"
+            # Reject per-core breakdowns (cpu="0", cpu="1", etc.)
+            if is_cpu:
+                cpu_label = labels.get('cpu', '')
+                if cpu_label != 'total':
+                    # Skip individual core metrics
+                    continue
             
             # Parse the metric value
             try:
