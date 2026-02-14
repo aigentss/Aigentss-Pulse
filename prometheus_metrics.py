@@ -266,7 +266,7 @@ def _parse_disk_usage(metrics_text: str) -> Optional[float]:
 
 # ========== CADVISOR SCRAPING (DOCKER METRICS) ==========
 
-def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: int = 1) -> Optional[List[Dict[str, Any]]]:
+def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: int = 1, total_ram_gb: Optional[float] = None) -> Optional[List[Dict[str, Any]]]:
     """
     Scrape Docker container metrics from cAdvisor.
     
@@ -275,16 +275,10 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: in
         port: cAdvisor port (default 8080)
         timeout: HTTP timeout in seconds
         num_cores: Number of CPU cores on the host (for % calc)
+        total_ram_gb: Total RAM of the host in GB (for sanity checks)
         
     Returns:
-        List of container metrics: [
-            {
-                'name': str,
-                'cpu_percent': float,
-                'memory_mb': float
-            },
-            ...
-        ]
+        List of container metrics
     """
     # Stealth check
     if not is_port_open(host, port, timeout):
@@ -299,7 +293,7 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: in
             response.raise_for_status()
             
             metrics_text = response.text
-            return _parse_container_metrics(metrics_text, host, num_cores)
+            return _parse_container_metrics(metrics_text, host, num_cores, total_ram_gb)
     
     return retry_with_backoff(_fetch, max_attempts=2, base_delay=1.0)
 
@@ -309,14 +303,15 @@ def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: in
 _DOCKER_CPU_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
-def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -> List[Dict[str, Any]]:
+def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, total_ram_gb: Optional[float] = None) -> List[Dict[str, Any]]:
     """
     Parse cAdvisor metrics with correct per-container isolation and CPU rate calculation.
     
     Args:
         metrics_text: Raw Prometheus metrics
         host: Host IP (for caching state)
-        num_cores: Total CPU cores on the host (CRITICAL for correct %)
+        num_cores: Total CPU cores on the host
+        total_ram_gb: Total RAM in GB (for validation)
     """
     containers_by_id = {}  # Use ID as key to ensure uniqueness
     current_time = time.time()
@@ -324,8 +319,11 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
     # Ensure at least 1 core to avoid division by zero
     num_cores = max(1, num_cores)
     
+    # Validation limit for memory (default to 1TB if unknown, or 2x physical RAM)
+    max_valid_ram_bytes = (total_ram_gb * 1024**3 * 2) if total_ram_gb else (1024**4) # 1TB default
+    
     try:
-        logger.debug(f"Parsing container metrics for {host} using {num_cores} cores")
+        logger.debug(f"Parsing container metrics for {host} using {num_cores} cores. Max valid RAM: {max_valid_ram_bytes/1024**3:.1f} GB")
         
         # FIRST PASS: Parse all metric lines and store by container ID
         for line in metrics_text.split('\n'):
@@ -333,7 +331,6 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
                 continue
             
             # Only process container CPU and memory metrics
-            # CRITICAL: Use the correct metric names that cAdvisor actually exports
             is_cpu = 'container_cpu_usage_seconds_total{' in line
             is_mem = 'container_memory_usage_bytes{' in line
             
@@ -361,31 +358,65 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
             
             # CRITICAL FIX: Memory metric selection
             if is_mem:
-                # Count how many labels this line has (simple heuristic: fewer labels = more aggregate)
-                # The aggregate memory metric should have id, name, image and container_label_* only
                 num_labels = len(labels)
-                
-                # If we already have a memory value for this container, check if this new line is "better"
-                # "Better" means it has fewer labels (is more aggregate)
                 if container_id in containers_by_id:
                     current_entry = containers_by_id[container_id]
-                    # We store the label count in the dict to compare
                     current_label_count = current_entry.get('_label_count', 999)
-                    
                     if num_labels >= current_label_count:
-                        # New line has more or equal labels -> likely more specific or duplicate -> skip
                         continue
-                    else:
-                        # New line has FEWER labels -> it is the aggregate we want -> overwrite
-                        pass
             else:
-                num_labels = 999 # Default for non-memory metrics
+                num_labels = 999
             
-            # Parse the metric value
+            # ROBUST PARSING: Handle lines with optional timestamp at end
+            # "metric_name{labels} VALUE [TIMESTAMP]"
+            parts = line.rsplit() # Split from right is cleaner? No, standard split.
+            # We need to extract the value. It is either the last or second to last token.
+            value = 0.0
             try:
-                value = float(line.split()[-1])
+                if len(parts) >= 2:
+                    # Try penult element first (assuming last is timestamp)
+                    # This works because metric values are floats, but metric names/labels 
+                    # usually won't parse as float unless they are weird. 
+                    # But parts[-2] could be part of the label string if we just split().
+                    # Since we are iterating lines, strict position is risky if labels have spaces.
+                    # HOWEVER, Prometheus format guarantees space-separation for VALUE.
+                    # Label values are quoted strings.
+                    
+                    # Strategy: Try to parse the *last* token. If it's a huge integer (timestamp-like)
+                    # and the *penultimate* token is also a number, then the last one IS a timestamp.
+                    
+                    last_token = parts[-1]
+                    penult_token = parts[-2] if len(parts) >= 2 else None
+                    
+                    # Try to parse last token
+                    val_last = float(last_token)
+                    
+                    # Check if last token looks like a timestamp (e.g. > 2000000000 for seconds, or > 1e12 for ms)
+                    # Current epoch is ~1.7e9 (seconds) or 1.7e12 (ms)
+                    # A legitimate value (e.g. bytes) can be large, so size alone isn't enough.
+                    # We check if the PENULT token is ALSO a valid float.
+                    
+                    if penult_token:
+                        try:
+                            val_penult = float(penult_token)
+                            # If both last and penult are numbers, the last one is likely timestamp
+                            # UNLESS the penult was actually part of a unquoted string? Unlikely in Prom format.
+                            value = val_penult
+                        except ValueError:
+                            # Penult is not a number, so last token MUST be the value
+                            value = val_last
+                    else:
+                        value = val_last
+                        
+                else:
+                    continue
             except (ValueError, IndexError):
-                logger.warning(f"Could not parse value from line: {line[:100]}")
+                logger.warning(f"Could not parse value from line: {line[:50]}")
+                continue
+
+            # SANITY CHECK: Value Validation
+            if is_mem and value > max_valid_ram_bytes:
+                logger.warning(f"Sanity Check: Ignoring memory value {value} for {name} (Limit: {max_valid_ram_bytes})")
                 continue
             
             # Initialize container entry if needed
@@ -396,7 +427,7 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
                     'image': image,
                     'cpu_seconds': 0.0,
                     'memory_bytes': 0.0,
-                    '_label_count': 999  # Initialize with high count
+                    '_label_count': 999 
                 }
             
             # Store the metric value
@@ -404,10 +435,8 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
                 if value > containers_by_id[container_id]['cpu_seconds']:
                     containers_by_id[container_id]['cpu_seconds'] = value
             elif is_mem:
-                # Update memory value and label count (we already filtered above)
                 containers_by_id[container_id]['memory_bytes'] = value
                 containers_by_id[container_id]['_label_count'] = num_labels
-                logger.debug(f"Updated memory for {name}: {value} bytes (labels={num_labels})")
         
         # SECOND PASS: Calculate CPU percentages using cache
         with _CACHE_LOCK:
@@ -438,15 +467,8 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1) -
                                 host_cache[cache_key] = (current_time, cpu_seconds)
                             elif cpu_delta >= 0:
                                 # FORMULA: (Delta CPU Seconds / (Delta Time * Cores)) * 100
-                                # This gives % of TOTAL HOST CPU capacity specific to this container
                                 cores_used = cpu_delta / time_delta
-                                
-                                # pct relative to total host capacity (all cores)
-                                # Example: using 2 cores on a 4 core machine = 50%
                                 raw_pct = (cores_used / num_cores) * 100.0
-                                
-                                # Cap at 100% * num_cores (if displaying per-core load) or 100% total
-                                # Here we want % of TOTAL SYSTEM resources, so 100% is max
                                 cpu_pct = min(raw_pct, 100.0)
                                 cpu_pct = max(0.0, cpu_pct)
                                 cpu_pct = round(cpu_pct, 2)
@@ -536,12 +558,17 @@ def scrape_vps(
     # Get Docker metrics if requested and system is UP
     if include_docker and system_metrics['status'] == 'UP':
         # Use detected CPU cores for accurate container % calculation
-        # If detection failed, default to 1 to avoid division by zero (though handled in parser)
         num_cores = 1
-        if 'hardware' in system_metrics and 'cpu_cores' in system_metrics['hardware']:
-            num_cores = system_metrics['hardware']['cpu_cores']
+        total_ram_gb = None
+        
+        if 'hardware' in system_metrics:
+            hw = system_metrics['hardware']
+            if 'cpu_cores' in hw:
+                num_cores = hw['cpu_cores']
+            if 'ram_gb' in hw:
+                total_ram_gb = hw['ram_gb']
             
-        docker_metrics = scrape_cadvisor(host, cadvisor_port, timeout=5, num_cores=num_cores)
+        docker_metrics = scrape_cadvisor(host, cadvisor_port, timeout=5, num_cores=num_cores, total_ram_gb=total_ram_gb)
         result['docker_containers'] = docker_metrics if docker_metrics else []
     else:
         result['docker_containers'] = []
