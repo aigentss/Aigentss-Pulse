@@ -35,7 +35,9 @@
 | **REST API** (`FastAPI`) – list VPS, latest status, metric history |
 | **Credential encryption** – Fernet (AES‑256) with master key stored in `.env` |
 | **Systemd service** – optional `aigents-pulse.service` for production‑grade startup |
-
+| **Auto-Healing** | Automatically detects and removes corrupt metrics (CPU > 100%, 1.6TB RAM bugs) |
+| **Robust Regex Scraper** | Advanced parsing logic to handle cAdvisor inconsistencies and edge cases |
+| **Altair Analytics** | Interactive charts with forced 0-100% Y-axis scaling for accurate capacity planning |
 ---  
 
 ## 🏗️ Architecture overview  

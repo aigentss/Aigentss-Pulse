@@ -4,8 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Secure notification service using SMTP with STARTTLS.
-Handles credential decryption and HTML/PNG email formatting.
+Notification Service. Handles SMTP connections, email composition, and attachment encryption/decryption.
 """
 
 import os

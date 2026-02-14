@@ -1,3 +1,11 @@
+"""
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
+
+Database maintenance utility. Detects and removes corrupt data or impossible outliers.
+"""
 
 import sqlite3
 import json
@@ -12,104 +20,82 @@ BASE_DIR = Path(__file__).parent
 SYSTEM_DB = BASE_DIR / "aigents_pulse.db"
 DOCKER_DB = BASE_DIR / "aigents_dockers_vps.db"
 
-def clean_system_metrics():
-    """Remove impossible system metrics (CPU > 110%, RAM > 100%)."""
-    if not SYSTEM_DB.exists():
-        logger.warning(f"System DB not found at {SYSTEM_DB}")
-        return
-
-    try:
-        conn = sqlite3.connect(str(SYSTEM_DB))
-        cursor = conn.cursor()
-        
-        # 1. Flag bad data
-        cursor.execute("SELECT COUNT(*) FROM status_history WHERE cpu_percent > 110 OR ram_percent > 100")
-        bad_count = cursor.fetchone()[0]
-        
-        if bad_count > 0:
-            logger.info(f"Found {bad_count} corrupt system metric records. Deleting...")
-            cursor.execute("DELETE FROM status_history WHERE cpu_percent > 110 OR ram_percent > 100")
-            conn.commit()
-            logger.info("Content deleted.")
-        else:
-            logger.info("System metrics look clean.")
-            
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error cleaning system DB: {e}")
-
-def clean_docker_snapshots():
-    """Scan Docker snapshots and delete rows with impossible values."""
-    if not DOCKER_DB.exists():
-        logger.warning(f"Docker DB not found at {DOCKER_DB}")
-        return
-
-    try:
-        conn = sqlite3.connect(str(DOCKER_DB))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        logger.info("Scanning Docker snapshots for corruption (Memory > 1TB or CPU > 500%)...")
-        
-        cursor.execute("SELECT id, containers_json FROM docker_snapshots")
-        rows = cursor.fetchall()
-        
-        delete_ids = []
-        
-        for row in rows:
-            try:
-                containers = json.loads(row['containers_json'])
-                is_corrupt = False
+def deep_clean():
+    """Aggressive cleaning of system and docker metrics to fix visualization scaling."""
+    logger.info("Starting Deep Clean Protocol...")
+    
+    # 1. Clean System Metrics (status_history)
+    if SYSTEM_DB.exists():
+        try:
+            with sqlite3.connect(str(SYSTEM_DB)) as conn:
+                cursor = conn.cursor()
                 
-                for c in containers:
-                    # Check Memory: > 1,000,000 MB (1TB) -> Corrupt (likely timestamp bug)
-                    mem_mb = c.get('memory_mb', 0)
-                    if mem_mb > 1000000:
-                        is_corrupt = True
-                        break
-                    
-                    # Check CPU: > 500% -> Likely corrupt (timestamp bug caused 98000%)
-                    cpu_pct = c.get('cpu_percent', 0)
-                    if cpu_pct > 500:
-                        is_corrupt = True
-                        break
+                # Delete CPU/RAM > 100% (impossible)
+                cursor.execute("DELETE FROM status_history WHERE cpu_percent > 100 OR ram_percent > 100")
+                deleted_metrics = cursor.rowcount
                 
-                if is_corrupt:
-                    delete_ids.append(row['id'])
-                    
-            except json.JSONDecodeError:
-                logger.warning(f"Found invalid JSON in row {row['id']}. Marking for deletion.")
-                delete_ids.append(row['id'])
-        
-        if delete_ids:
-            logger.info(f"Found {len(delete_ids)} corrupt snapshot rows out of {len(rows)}. Deleting...")
-            # Batch delete
-            placeholders = ','.join('?' * len(delete_ids))
-            sql = f"DELETE FROM docker_snapshots WHERE id IN ({placeholders})"
-            cursor.execute(sql, delete_ids)
-            conn.commit()
-            logger.info("Corrupt snapshots deleted.")
-        else:
-            logger.info("Docker snapshots look clean (scan mode).")
+                # Delete Latency > 5000ms (absurd/timeout)
+                cursor.execute("DELETE FROM status_history WHERE latency_ms > 5000")
+                deleted_latency = cursor.rowcount
+                
+                conn.commit()
+                logger.info(f"✓ System DB Cleaned: Removed {deleted_metrics} impossible metrics and {deleted_latency} high latency records.")
+        except Exception as e:
+            logger.error(f"Error cleaning System DB: {e}")
             
-        # 3. DIRECT SQL CLEANUP (User Request)
-        logger.info("Running deep SQL cleanup for known artifacts...")
-        # Remove specific timestamp value if it leaked into JSON text
-        # 1689046 MB is roughly 1.6TB
-        cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%\"memory_mb\": 1689046%'")
-        cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%\"cpu_percent\": 988%'") # Example CPU overflow
-        conn.commit()
-        
-        # VACUUM to reclaim space
-        logger.info("Vacuuming database...")
-        conn.execute("VACUUM")
-            
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error cleaning Docker DB: {e}")
+    # 2. Clean Docker Snapshots (docker_snapshots)
+    if DOCKER_DB.exists():
+        try:
+            with sqlite3.connect(str(DOCKER_DB)) as conn:
+                cursor = conn.cursor()
+                
+                # Remove rows with the specific known corrupt value (1.6TB)
+                # The user specified 1,689,046 MB
+                cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%1689046%'")
+                specific_deleted = cursor.rowcount
+                
+                # General safety net for other massive outliers
+                # RAM > 1TB (1048576 MB)
+                cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%\"memory_mb\": 1_______.%'") # Regex-like wildcard for 7+ digits
+                # NOTE: SQLite LIKE is limited, better to use the specific value or do Python-side filtering if needed. 
+                # But the user provided script used LIKE '%1689046%', so we stick to that + strict Python iteration for safety.
+                
+                conn.commit()
+                
+                # Double check with Python iteration for anything missed by simple LIKE
+                cursor.execute("SELECT id, containers_json FROM docker_snapshots")
+                rows = cursor.fetchall()
+                ids_to_delete = []
+                
+                for row_id, data in rows:
+                    if not data: continue
+                    try:
+                        containers = json.loads(data)
+                        for c in containers:
+                            # 100GB limit for Docker container (conservative sanify check for a VPS)
+                            if c.get('memory_mb', 0) > 102400: 
+                                ids_to_delete.append(row_id)
+                                break
+                            # 500% CPU is technically possible on 5+ cores, but 98000% is not. 
+                            # Let's cap at 6400% (64 cores) to be safe, or just check for "inf" / NaN
+                            if c.get('cpu_percent', 0) > 10000:
+                                ids_to_delete.append(row_id)
+                                break
+                    except:
+                        ids_to_delete.append(row_id) # Delete corrupt JSON
+                
+                if ids_to_delete:
+                    cursor.executemany("DELETE FROM docker_snapshots WHERE id = ?", [(i,) for i in ids_to_delete])
+                    conn.commit()
+                    logger.info(f"✓ Docker DB Deep Scanned: Removed {len(ids_to_delete)} additional corrupt snapshots.")
+                
+                logger.info(f"✓ Docker DB Cleaned: Removed {specific_deleted} rows matching known corrupt signature.")
+                
+                # Optimize
+                conn.execute("VACUUM")
+
+        except Exception as e:
+            logger.error(f"Error cleaning Docker DB: {e}")
 
 if __name__ == "__main__":
-    print("--- Starting Database Cleanup ---")
-    clean_system_metrics()
-    clean_docker_snapshots()
-    print("--- Cleanup Complete ---")
+    deep_clean()

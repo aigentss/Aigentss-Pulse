@@ -4,10 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Database layer providing SQLite persistence with WAL mode and optimized PRAGMAs.
-Handles two dedicated databases:
-1. aigents_pulse.db: System metadata, VPS inventory, and alerts.
-2. aigents_dockers_vps.db: Dedicated Docker container metric history.
+Database Abstraction Layer (SQLite + WAL). Handles all persistence for system metrics, Docker snapshots, and config.
 """
 
 import sqlite3

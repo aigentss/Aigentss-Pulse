@@ -4,8 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Elite UI/UX for Infrastructure Observability. 
-Provides dual themes, real-time metrics, and Docker container sub-dashboards.
+Elite UI/UX for Infrastructure Observability. Provides dual themes, real-time metrics, and Docker container sub-dashboards.
 """
 
 import streamlit as st
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import logging
 import json
+import altair as alt
 
 # Import our modules
 import db
@@ -494,7 +494,29 @@ def main():
             
             if chart_data:
                 df = pd.DataFrame(chart_data)
-                st.line_chart(df.pivot(index='Time', columns='VPS',values=metric_type), height=400)
+                
+                # USE ALTAIR TO FORCE Y-AXIS SCALE
+                if metric_type in ["CPU %", "RAM %", "Disk %"]:
+                    # Force 0-100 scale for percentages
+                    y_scale = alt.Scale(domain=[0, 100])
+                    y_title = f"{metric_type} (Capacity)"
+                else:
+                    # Auto-scale for Latency but maybe cap it visually if huge?
+                    # For now, let latency auto-scale but we cleaned the DB so it should be fine.
+                    y_scale = alt.Scale(zero=True) # Ensure it starts at 0
+                    y_title = metric_type
+
+                # Create the chart
+                chart = alt.Chart(df).mark_line(point=True).encode(
+                    x=alt.X('Time:T', title='Time'),
+                    y=alt.Y(metric_type, title=y_title, scale=y_scale),
+                    color=alt.Color('VPS:N', title='VPS Node'),
+                    tooltip=['Time', 'VPS', alt.Tooltip(metric_type, format='.2f')]
+                ).properties(
+                    height=400
+                ).interactive()
+
+                st.altair_chart(chart, use_container_width=True)
                 
                 # Summary statistics with units
                 st.subheader("📈 Summary Statistics")

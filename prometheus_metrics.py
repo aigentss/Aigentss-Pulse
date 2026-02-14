@@ -4,8 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Prometheus metrics scraper for Node Exporter (System) and cAdvisor (Docker).
-Supports exponential backoff retries and stealth port checking.
+Prometheus metrics scraper. Fetches and parses data from Node Exporter and cAdvisor with robust regex logic.
 """
 
 import socket
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ========== STEALTH PORT CHECKING ==========
 
-def is_port_open(host: str, port: int, timeout: int = 5) -> bool:
+def is_port_open(host: str, port: int, timeout: int = 10) -> bool:
     """
     Stealth check if a port is open before attempting HTTP connection.
     
@@ -125,7 +124,7 @@ def _parse_hardware_info(metrics_text: str) -> Dict[str, Any]:
 
 # ========== NODE EXPORTER SCRAPING ==========
 
-def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 5) -> Optional[Dict[str, Any]]:
+def scrape_node_exporter(host: str, port: int = 9100, timeout: int = 10) -> Optional[Dict[str, Any]]:
     """
     Scrape system metrics from Node Exporter.
     
@@ -268,7 +267,7 @@ def _parse_disk_usage(metrics_text: str) -> Optional[float]:
 
 # ========== CADVISOR SCRAPING (DOCKER METRICS) ==========
 
-def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 5, num_cores: int = 1, total_ram_gb: Optional[float] = None) -> Optional[List[Dict[str, Any]]]:
+def scrape_cadvisor(host: str, port: int = 8080, timeout: int = 10, num_cores: int = 1, total_ram_gb: Optional[float] = None) -> Optional[List[Dict[str, Any]]]:
     """
     Scrape Docker container metrics from cAdvisor.
     
@@ -321,11 +320,12 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, t
     # Ensure at least 1 core to avoid division by zero
     num_cores = max(1, num_cores)
     
-    # Validation limit for memory (default to 1TB if unknown, or 2x physical RAM)
-    max_valid_ram_bytes = (total_ram_gb * 1024**3 * 2) if total_ram_gb else (1024**4) # 1TB default
+    # Validation limit for memory (default to 64GB if unknown, or 2x physical RAM)
+    # We set a hard cap of 128GB for a VPS context to catch the 1.6TB bug
+    max_valid_ram_bytes = (total_ram_gb * 1024**3 * 1.5) if total_ram_gb else (128 * 1024**3) # 128GB default cap
     
     try:
-        logger.debug(f"Parsing container metrics for {host} using {num_cores} cores. Max valid RAM: {max_valid_ram_bytes/1024**3:.1f} GB")
+        logger.debug(f"Parsing container metrics for {host}. Max valid RAM: {max_valid_ram_bytes/1024**3:.1f} GB")
         
         # FIRST PASS: Parse all metric lines and store by container ID
         for line in metrics_text.split('\n'):
@@ -358,7 +358,7 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, t
                 if cpu_label != 'total':
                     continue
             
-            # CRITICAL FIX: Memory metric selection
+            # Memory metric selection (prefer most specific)
             if is_mem:
                 num_labels = len(labels)
                 if container_id in containers_by_id:
@@ -370,45 +370,38 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, t
                 num_labels = 999
             
             # ROBUST PARSING: Use Regex to extract value and ignore potential timestamp
-            # Format: metric_name{labels} VALUE [TIMESTAMP]
-            # We look for the value immediately following the closing brace '}'
-            # Pattern explanation:
-            #   \}\s+           -> closing brace and whitespace
-            #   ([\d.eE+-]+)    -> Capture group 1: The float value (handles scientific notation like 1.23e+05)
-            #   (?:\s+\d+)?$    -> Optional non-capturing group: whitespace and integer timestamp at end of line
-            match = re.search(r'\}\s+([\d.eE+-]+)(?:\s+\d+)?$', line)
+            # This Regex looks for: [Space] [Value] [Optional Space] [Optional Timestamp] [End of Line]
+            # It explicitly avoids matching the timestamp as the value.
+            match = re.search(r'\s+([\d.eE+-]+)(?:\s+\d+)?$', line)
             
             if match:
                 try:
-                    value = float(match.group(1))
+                    raw_val = float(match.group(1))
+                    
+                    # === SANITY CHECKS (The "Anti-Gravity" Logic) ===
+                    
+                    if is_mem:
+                        # Check: Memory > Max Limit (e.g. 1.6TB bug)
+                        if raw_val > max_valid_ram_bytes:
+                            # Log only once per scrape per container to avoid spam
+                            # logger.warning(f"Sanity: Dropped memory outlier {raw_val/1024**3:.1f}GB for {name}")
+                            continue
+                        value = raw_val
+                        
+                    elif is_cpu:
+                        # Check: CPU Seconds > impossibly high number implies corruption or bad parsing
+                        # But seconds is cumulative, so it can be high. 
+                        # We rely on the DELTA calculation later to filter bad rates.
+                        # However, if we see "98000%" in rate, that's handled in the rate calc.
+                        value = raw_val
+                    else:
+                        value = raw_val
+                        
                 except ValueError:
-                    logger.warning(f"Could not parse float value from match: {match.group(1)}")
                     continue
             else:
-                # Fallback: if regex fails (maybe no labels?), look for the last token that is a float, 
-                # but careful of timestamp.
-                parts = line.split()
-                if len(parts) >= 2:
-                    # Try penult logic as backup
-                    try:
-                        last = float(parts[-1])
-                        penult = float(parts[-2])
-                        # If penult is float, last is likely timestamp -> use penult
-                        value = penult
-                    except (ValueError, IndexError):
-                        try:
-                            # If only last is float, use it
-                            value = float(parts[-1])
-                        except ValueError:
-                            continue
-                else:
-                    continue
-
-            # SANITY CHECK: Value Validation
-            if is_mem and value > max_valid_ram_bytes:
-                logger.warning(f"Sanity Check: Ignoring memory value {value} for {name} (Limit: {max_valid_ram_bytes})")
                 continue
-            
+
             # Initialize container entry if needed
             if container_id not in containers_by_id:
                 containers_by_id[container_id] = {
@@ -459,9 +452,16 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, t
                                 # FORMULA: (Delta CPU Seconds / (Delta Time * Cores)) * 100
                                 cores_used = cpu_delta / time_delta
                                 raw_pct = (cores_used / num_cores) * 100.0
-                                cpu_pct = min(raw_pct, 100.0)
-                                cpu_pct = max(0.0, cpu_pct)
-                                cpu_pct = round(cpu_pct, 2)
+                                
+                                # SANITY CHECK FOR CPU %
+                                # Even with 100 cores, 10,000% is unlikely. 
+                                # cAdvisor bug can return massive spikes.
+                                if raw_pct > (num_cores * 100 * 2): # allow 2x burst
+                                    # logger.warning(f"Sanity: Dropped CPU spike {raw_pct:.1f}% for {name}")
+                                    cpu_pct = 0.0 # Ignore spike
+                                else:
+                                    cpu_pct = min(raw_pct, num_cores * 100.0) # Cap at max theoretical
+                                    cpu_pct = round(cpu_pct, 2)
                     
                     # Update cache
                     host_cache[cache_key] = (current_time, cpu_seconds)
@@ -491,6 +491,7 @@ def _extract_all_labels(line: str) -> Dict[str, str]:
         
         label_str = line.split('{')[1].split('}')[0]
         # Regex to handle quoted values with commas
+        # e.g. name="foo,bar",id="123"
         import re
         matches = re.finditer(r'([a-zA-Z0-9_]+)="([^"]*)"', label_str)
         for m in matches:
@@ -558,7 +559,7 @@ def scrape_vps(
             if 'ram_gb' in hw:
                 total_ram_gb = hw['ram_gb']
             
-        docker_metrics = scrape_cadvisor(host, cadvisor_port, timeout=5, num_cores=num_cores, total_ram_gb=total_ram_gb)
+        docker_metrics = scrape_cadvisor(host, cadvisor_port, timeout=10, num_cores=num_cores, total_ram_gb=total_ram_gb)
         result['docker_containers'] = docker_metrics if docker_metrics else []
     else:
         result['docker_containers'] = []

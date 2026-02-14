@@ -1,7 +1,10 @@
 """
 Aigents Pulse v3.1 (Spectre+)
-Security Metrics Module
 Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
+
+Security Auditing Module. Collects security telemetry (UFW, Fail2Ban, Auth logs) from remote nodes.
 """
 
 import time

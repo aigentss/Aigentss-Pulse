@@ -4,8 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Alert engine that detects VPS status transitions (UP -> DOWN).
-Generates 24-hour visual intelligence graphs for email notifications.
+Alert Engine. Checks for UP/DOWN state transitions and sends HTML emails with embedded PNG graphs.
 """
 
 import hashlib

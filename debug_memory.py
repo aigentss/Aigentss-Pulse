@@ -1,3 +1,12 @@
+"""
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
+
+Debug script to analyze memory usage of the application.
+"""
+
 #!/usr/bin/env python3
 """
 Debug script to test cAdvisor metric parsing locally

@@ -1,3 +1,12 @@
+"""
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
+Date: 2026-02-10
+Propietario: Aigents Solutions
+
+Utility to clear Streamlit cache and pycache files.
+"""
+
 #!/usr/bin/env python3
 """
 Clear Docker CPU cache to force recalculation of container metrics.

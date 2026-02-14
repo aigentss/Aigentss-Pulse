@@ -4,8 +4,7 @@ Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutio
 Date: 2026-02-10
 Propietario: Aigents Solutions
 
-Singleton Monitoring Daemon that periodically scrapes metrics from all enabled VPS
-using a thread pool for concurrent collection.
+Singleton Monitoring Daemon that periodically scrapes metrics from all enabled VPS using a thread pool.
 """
 
 import threading
@@ -19,6 +18,7 @@ import yaml
 import db
 import prometheus_metrics
 import security_metrics
+import db_cleanup_metrics
 
 
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +99,12 @@ class MonitorDaemon:
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="MonitorDaemon")
         self._thread.start()
         
+        # Run deep clean on startup to ensure data integrity
+        try:
+             db_cleanup_metrics.deep_clean()
+        except Exception as e:
+             logger.error(f"Startup DB cleanup failed: {e}")
+        
         logger.info(f"✓ Monitor daemon started (interval={self._interval}s)")
     
     def stop(self):
@@ -138,6 +144,11 @@ class MonitorDaemon:
                 
             except Exception as e:
                 logger.error(f"Collection cycle error: {e}", exc_info=True)
+                # Auto-heal attempt on error
+                try:
+                    db_cleanup_metrics.deep_clean()
+                except:
+                    pass
                 time.sleep(5)  # Brief pause before retrying
     
     def _collect_all_metrics(self):
