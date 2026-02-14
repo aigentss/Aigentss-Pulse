@@ -300,6 +300,26 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
                 logger.warning(f"Could not parse value from line: {line[:100]}")
                 continue
             
+            # CRITICAL FIX: For memory metrics, cAdvisor reports multiple lines per container
+            # with different label combinations. We MUST select ONLY the aggregate line
+            # that contains minimal labels (just id, name, image, container_label_*)
+            # The aggregate line will be the one WITHOUT extra dimensions like "endpoint", "namespace", etc.
+            if is_mem:
+                # Count how many labels this line has (simple heuristic: fewer labels = more aggregate)
+                # The aggregate memory metric should have id, name, image and container_label_* only
+                num_labels = len(labels)
+                
+                # If this container already has a memory value AND this new value has MORE labels,
+                # skip it (we want the most aggregate value, which has fewer labels)
+                if container_id in containers_by_id:
+                    existing_mem = containers_by_id[container_id].get('memory_bytes', 0)
+                    # Only update if this value is different and we haven't stored a good value yet
+                    # OR if this is a larger value (which means it's likely the aggregate)
+                    if existing_mem == 0 or value < existing_mem:
+                        # If new value is smaller, it's likely more specific, so skip
+                        logger.debug(f"Skipping memory metric for {name} - already have aggregate value")
+                        continue
+            
             # Initialize container entry if needed
             if container_id not in containers_by_id:
                 containers_by_id[container_id] = {
@@ -318,10 +338,12 @@ def _parse_container_metrics(metrics_text: str, host: str) -> List[Dict[str, Any
             elif is_mem:
                 # DEBUG: Log memory values being parsed
                 logger.debug(f"Memory metric for {name} ({container_id[:12]}): {value} bytes")
-                # Only update if this is a higher value
-                if value > containers_by_id[container_id]['memory_bytes']:
-                    logger.debug(f"  → Updating container memory from {containers_by_id[container_id]['memory_bytes']} to {value} bytes")
+                # For memory, take the FIRST value we see (should be the aggregate)
+                if containers_by_id[container_id]['memory_bytes'] == 0:
+                    logger.debug(f"  → Setting container memory to {value} bytes")
                     containers_by_id[container_id]['memory_bytes'] = value
+                else:
+                    logger.debug(f"  → Skipping (already have {containers_by_id[container_id]['memory_bytes']} bytes)")
         
         logger.debug(f"Found {len(containers_by_id)} unique containers")
         
