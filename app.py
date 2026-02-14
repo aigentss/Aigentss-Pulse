@@ -52,6 +52,13 @@ st.set_page_config(
 def apply_theme(theme_name: str):
     """Apply custom CSS for the selected theme."""
     
+    # --- VISUAL SETTINGS (GLOBAL) ---
+    # We inject this into the sidebar here so it's available everywhere
+    with st.sidebar.expander("🎨 Visual Settings", expanded=False):
+        st.session_state['show_points'] = st.checkbox("Show Data Points", value=False)
+        st.session_state['line_stroke'] = st.slider("Line Thickness", 0.5, 5.0, 1.5, 0.5)
+        st.session_state['curve_type'] = st.selectbox("Line Curve", ["monotone", "linear", "step", "basis"], index=0)
+
     if theme_name == "Infinity":
         # Dark theme with neon accents
         st.markdown("""
@@ -239,6 +246,33 @@ def get_monitor_daemon():
 
 # ========== HELPER FUNCTIONS ==========
 
+def create_history_chart(data, y_col, title, color_hex):
+    """Create a sparkline-style history chart using Altair."""
+    if data.empty:
+        return st.info("No history data available")
+
+    # Convert timestamp to datetime for Altair if not already
+    if not pd.api.types.is_datetime64_any_dtype(data['timestamp']):
+            data['timestamp_dt'] = pd.to_datetime(data['timestamp'], unit='s')
+    else:
+            data['timestamp_dt'] = data['timestamp']
+
+    chart = alt.Chart(data).mark_line(
+        point=st.session_state.get('show_points', False),
+        strokeWidth=st.session_state.get('line_stroke', 1.5),
+        interpolate=st.session_state.get('curve_type', 'monotone'),
+        color=color_hex
+    ).encode(
+        x=alt.X('timestamp_dt:T', axis=alt.Axis(title=None, format='%H:%M')),
+        y=alt.Y(y_col, axis=alt.Axis(title=title), scale=alt.Scale(domain=[0, 100])),
+        tooltip=['timestamp_dt', alt.Tooltip(y_col, title=title, format='.1f')]
+    ).properties(
+        height=250
+    ).interactive()
+
+    st.altair_chart(chart, use_container_width=True)
+
+
 def format_timestamp(ts: int) -> str:
     """Format Unix timestamp to human-readable string."""
     return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
@@ -384,12 +418,17 @@ def main():
                         for c in conts:
                             hist_data.append({
                                 "Time": ts,
+                                "timestamp": h['timestamp'], # Add raw TS for Altair
                                 "Container": c['name'],
                                 "Status": c.get('status', 'RUNNING'),
                                 "CPU %": c.get('cpu_percent', 0.0),
                                 "Memory GB": round((c.get('memory_mb', 0.0) / 1024.0), 3)
                             })
                     df_docker = pd.DataFrame(hist_data)
+                    # Convert Time to datetime for Altair
+                    df_docker['Time_dt'] = pd.to_datetime(df_docker['timestamp'], unit='s')
+
+                    # ... (rest of processing)
 
                     # Resource Summaries (Top Consumers)
                     if not df_docker.empty:
@@ -427,7 +466,24 @@ def main():
                                 if not df_docker.empty:
                                     c_hist = df_docker[df_docker['Container'] == c_name].tail(10)
                                     if not c_hist.empty:
-                                        st.line_chart(c_hist.set_index('Time')['CPU %'], height=60, use_container_width=True)
+                                        # Use Altair for sparklines too to match style? 
+                                        # st.line_chart is simple but doesn't support our styling constraints easily.
+                                        # Let's upgrade this to Altair sparkline
+                                        
+                                        spark = alt.Chart(c_hist).mark_line(
+                                            point=False, # Sparklines usually no points
+                                            strokeWidth=st.session_state.get('line_stroke', 1.5),
+                                            interpolate=st.session_state.get('curve_type', 'monotone'),
+                                            color='#00d4ff'
+                                        ).encode(
+                                            x=alt.X('Time:T', axis=None),
+                                            y=alt.Y('CPU %:Q', axis=None, scale=alt.Scale(domain=[0, 100])),
+                                            tooltip=['Time', 'CPU %']
+                                        ).properties(
+                                            height=60,
+                                            width='container'
+                                        )
+                                        st.altair_chart(spark, use_container_width=True)
 
                     st.divider()
                     
@@ -516,7 +572,11 @@ def main():
                     y_title = metric_type
 
                 # Create the chart
-                chart = alt.Chart(df).mark_line(point=True).encode(
+                chart = alt.Chart(df).mark_line(
+                    point=st.session_state.get('show_points', False),
+                    strokeWidth=st.session_state.get('line_stroke', 1.5),
+                    interpolate=st.session_state.get('curve_type', 'monotone')
+                ).encode(
                     x=alt.X('Time:T', title='Time'),
                     y=alt.Y(metric_type, title=y_title, scale=y_scale),
                     color=alt.Color('VPS:N', title='VPS Node'),
