@@ -89,12 +89,20 @@ def clean_docker_snapshots():
             cursor.execute(sql, delete_ids)
             conn.commit()
             logger.info("Corrupt snapshots deleted.")
-            
-            # VACUUM to reclaim space
-            logger.info("Vacuuming database...")
-            conn.execute("VACUUM")
         else:
-            logger.info("Docker snapshots look clean.")
+            logger.info("Docker snapshots look clean (scan mode).")
+            
+        # 3. DIRECT SQL CLEANUP (User Request)
+        logger.info("Running deep SQL cleanup for known artifacts...")
+        # Remove specific timestamp value if it leaked into JSON text
+        # 1689046 MB is roughly 1.6TB
+        cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%\"memory_mb\": 1689046%'")
+        cursor.execute("DELETE FROM docker_snapshots WHERE containers_json LIKE '%\"cpu_percent\": 988%'") # Example CPU overflow
+        conn.commit()
+        
+        # VACUUM to reclaim space
+        logger.info("Vacuuming database...")
+        conn.execute("VACUUM")
             
         conn.close()
     except Exception as e:

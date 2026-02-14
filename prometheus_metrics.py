@@ -10,12 +10,14 @@ Supports exponential backoff retries and stealth port checking.
 
 import socket
 import time
-import logging
-import threading
 import httpx
+import re
+import threading
+import logging
 import psutil
-from typing import Dict, List, Optional, Any, Callable
-
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -367,52 +369,40 @@ def _parse_container_metrics(metrics_text: str, host: str, num_cores: int = 1, t
             else:
                 num_labels = 999
             
-            # ROBUST PARSING: Handle lines with optional timestamp at end
-            # "metric_name{labels} VALUE [TIMESTAMP]"
-            parts = line.rsplit() # Split from right is cleaner? No, standard split.
-            # We need to extract the value. It is either the last or second to last token.
-            value = 0.0
-            try:
+            # ROBUST PARSING: Use Regex to extract value and ignore potential timestamp
+            # Format: metric_name{labels} VALUE [TIMESTAMP]
+            # We look for the value immediately following the closing brace '}'
+            # Pattern explanation:
+            #   \}\s+           -> closing brace and whitespace
+            #   ([\d.eE+-]+)    -> Capture group 1: The float value (handles scientific notation like 1.23e+05)
+            #   (?:\s+\d+)?$    -> Optional non-capturing group: whitespace and integer timestamp at end of line
+            match = re.search(r'\}\s+([\d.eE+-]+)(?:\s+\d+)?$', line)
+            
+            if match:
+                try:
+                    value = float(match.group(1))
+                except ValueError:
+                    logger.warning(f"Could not parse float value from match: {match.group(1)}")
+                    continue
+            else:
+                # Fallback: if regex fails (maybe no labels?), look for the last token that is a float, 
+                # but careful of timestamp.
+                parts = line.split()
                 if len(parts) >= 2:
-                    # Try penult element first (assuming last is timestamp)
-                    # This works because metric values are floats, but metric names/labels 
-                    # usually won't parse as float unless they are weird. 
-                    # But parts[-2] could be part of the label string if we just split().
-                    # Since we are iterating lines, strict position is risky if labels have spaces.
-                    # HOWEVER, Prometheus format guarantees space-separation for VALUE.
-                    # Label values are quoted strings.
-                    
-                    # Strategy: Try to parse the *last* token. If it's a huge integer (timestamp-like)
-                    # and the *penultimate* token is also a number, then the last one IS a timestamp.
-                    
-                    last_token = parts[-1]
-                    penult_token = parts[-2] if len(parts) >= 2 else None
-                    
-                    # Try to parse last token
-                    val_last = float(last_token)
-                    
-                    # Check if last token looks like a timestamp (e.g. > 2000000000 for seconds, or > 1e12 for ms)
-                    # Current epoch is ~1.7e9 (seconds) or 1.7e12 (ms)
-                    # A legitimate value (e.g. bytes) can be large, so size alone isn't enough.
-                    # We check if the PENULT token is ALSO a valid float.
-                    
-                    if penult_token:
+                    # Try penult logic as backup
+                    try:
+                        last = float(parts[-1])
+                        penult = float(parts[-2])
+                        # If penult is float, last is likely timestamp -> use penult
+                        value = penult
+                    except (ValueError, IndexError):
                         try:
-                            val_penult = float(penult_token)
-                            # If both last and penult are numbers, the last one is likely timestamp
-                            # UNLESS the penult was actually part of a unquoted string? Unlikely in Prom format.
-                            value = val_penult
+                            # If only last is float, use it
+                            value = float(parts[-1])
                         except ValueError:
-                            # Penult is not a number, so last token MUST be the value
-                            value = val_last
-                    else:
-                        value = val_last
-                        
+                            continue
                 else:
                     continue
-            except (ValueError, IndexError):
-                logger.warning(f"Could not parse value from line: {line[:50]}")
-                continue
 
             # SANITY CHECK: Value Validation
             if is_mem and value > max_valid_ram_bytes:
