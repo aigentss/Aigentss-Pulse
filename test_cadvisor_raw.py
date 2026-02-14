@@ -1,3 +1,17 @@
+"""
+Aigents Pulse v3.1 (Spectre+)
+Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+Date: 2026-02-14
+Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+
+Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+PROPRIETARY AND CONFIDENTIAL.
+
+Module: test_cadvisor_raw.py
+Auto-generated description.
+"""
+
 #!/usr/bin/env python3
 """
 Test script to download and inspect raw cAdvisor metrics from a VPS.

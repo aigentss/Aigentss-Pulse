@@ -1,14 +1,18 @@
 """
 Aigents Pulse v3.1 (Spectre+)
-Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
-Date: 2026-02-10
-Propietario: Aigents Solutions
+Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+Date: 2026-02-14
+Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+
+Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+PROPRIETARY AND CONFIDENTIAL.
 
 Alerting Engine.
 
 ARCHITECTURAL DECISION:
-- State-based triggering: Checks for transitions (UP -> DOWN) rather than continuous failed states to reduce alert fatigue.
-- Embeds visual evidence (PNG graphs) directly in emails using Matplotlib backend to provide immediate context without logging in.
+- State-based triggering: Checks for transitions (UP -> DOWN) rather than continuous failed states.
+- Embeds visual evidence (PNG graphs) directly in emails using Matplotlib backend.
 """
 
 import hashlib

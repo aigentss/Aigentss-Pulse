@@ -1,6 +1,17 @@
 #!/bin/bash
-# Script to restart the monitoring daemon and clear cache
-# This forces fresh recalculation of all metrics
+# ==============================================================================
+# Aigents Pulse v3.1 (Spectre+)
+# Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+# Date: 2026-02-14
+# Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+#
+# Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+# Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+# PROPRIETARY AND CONFIDENTIAL.
+#
+# Maintenance Script.
+Restarts the service and clears execution cache.
+# ==============================================================================
 
 echo "Restarting Aigents Pulse to clear Docker CPU cache..."
 

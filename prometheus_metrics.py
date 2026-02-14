@@ -1,14 +1,18 @@
 """
 Aigents Pulse v3.1 (Spectre+)
-Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
-Date: 2026-02-10
-Propietario: Aigents Solutions
+Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+Date: 2026-02-14
+Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+
+Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+PROPRIETARY AND CONFIDENTIAL.
 
 Scraping Logic for Prometheus Endpoints.
 
 ARCHITECTURAL DECISION:
 - Custom parser instead of `prometheus_client` library to handle specific 'cAdvisor' format inconsistencies (spaces, timestamps).
-- Enforces strict regex validation `r'\s+([\d.eE+-]+)(?:\s+\d+)?$'` to reject corrupt data.
+- Enforces strict regex validation to reject corrupt data.
 - Applies immediate sanity checks (CPU > N*100%, RAM > 128GB) at the ingestion layer.
 """
 

@@ -1,13 +1,17 @@
 """
 Aigents Pulse v3.1 (Spectre+)
-Developed by: Ing. Ángel David Yaguana, Dr. h.c. - CAIO & CIO | Aigents Solutions
-Date: 2026-02-10
-Propietario: Aigents Solutions
+Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+Date: 2026-02-14
+Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+
+Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+PROPRIETARY AND CONFIDENTIAL.
 
 Data Sanitation & Auto-Healing Utility.
 
 ARCHITECTURAL DECISION:
-- Aggressively deletes records violating physical constraints (Latency > 5000ms, CPU > 100%).
+- Aggressively deletes records violating physical constraints (Latency > 5000ms).
 - Hardcoded fixes for known '1.6TB Memory' cAdvisor bugs.
 """
 

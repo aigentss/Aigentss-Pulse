@@ -1,14 +1,17 @@
 #!/bin/bash
-#
+# ==============================================================================
 # Aigents Pulse v3.1 (Spectre+)
-# Instalador automatizado de agentes (Node Exporter + cAdvisor)
-# --------------------------------------------------------------
-# IMPORTANTE:
-#   * El script **debe ejecutarse como root** (sudo ./install.sh) o
-#     con una cuenta que ya tenga privilegios de super‑usuario.
-#   * Si lo ejecutas sin root, el script se abortará con un mensaje
-#     explicativo para evitar los errores “cannot connect to the docker API”.
-# --------------------------------------------------------------
+# Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+# Date: 2026-02-14
+# Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+#
+# Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+# Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+# PROPRIETARY AND CONFIDENTIAL.
+#
+# Main Installer Script for Client VPS.
+Installs Docker, Node Exporter, and cAdvisor. Configures UFW.
+# ==============================================================================
 
 set -euo pipefail   # Fail on error, undefined variables, y tuberías rotas
 

@@ -1,8 +1,17 @@
-#!/usr/bin/env bash
-# -------------------------------------------------------------------------
+#!/bin/bash
+# ==============================================================================
 # Aigents Pulse v3.1 (Spectre+)
-# Setup Systemd Service for Master Server
-# -------------------------------------------------------------------------
+# Developed by: Ing. Ángel David Yaguana, Dr. h.c.
+# Date: 2026-02-14
+# Propietario: Ing. Ángel David Yaguana, Dr. h.c.
+#
+# Designed for VPS monitoring of Aigents Solutions Corp (USA) and Aigents Solutions SAS (Ecuador).
+# Protected by Intellectual Property Laws. Use authorized explicitly by the owner.
+# PROPRIETARY AND CONFIDENTIAL.
+#
+# Systemd Service Installer.
+Configures Aigents Pulse to run as a persistent system service.
+# ==============================================================================
 
 set -euo pipefail
 
