@@ -518,6 +518,58 @@ def main():
                         else:
                             st.info(f"💡 Docker containers are utilizing approximately **{total_docker_cpu:.1f}%** of the current CPU load.")
                     
+                    # --- ADDED: Full Docker History Chart ---
+                    st.subheader("🐳 Docker Container History")
+                    
+                    # We need a DataFrame with 'Time', 'Container', 'CPU %', 'Memory GB'
+                    # which we already have in df_docker
+                    
+                    if not df_docker.empty:
+                         # Create a selection for interactivity
+                        selection = alt.selection_point(fields=['Container'], bind='legend')
+                        
+                        base = alt.Chart(df_docker).encode(
+                            x=alt.X('Time_dt:T', title='Time', axis=alt.Axis(format='%H:%M'))
+                        )
+
+                        # CPU Chart
+                        cpu_chart = base.mark_line(
+                            point=st.session_state.get('show_points', False),
+                            strokeWidth=st.session_state.get('line_stroke', 1.5),
+                            interpolate=st.session_state.get('curve_type', 'monotone')
+                        ).encode(
+                            y=alt.Y('CPU %:Q', title='CPU %', scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color('Container:N'),
+                            opacity=alt.condition(selection, alt.value(1), alt.value(0.2)),
+                            tooltip=['Time', 'Container', 'CPU %']
+                        ).add_params(
+                            selection
+                        ).properties(
+                            height=300,
+                            title="Container CPU Usage Over Time"
+                        ).interactive()
+                        
+                        st.altair_chart(cpu_chart, use_container_width=True)
+
+                        # Memory Chart
+                        mem_chart = base.mark_line(
+                            point=st.session_state.get('show_points', False),
+                            strokeWidth=st.session_state.get('line_stroke', 1.5),
+                            interpolate=st.session_state.get('curve_type', 'monotone')
+                        ).encode(
+                            y=alt.Y('Memory GB:Q', title='Memory (GB)'),
+                            color=alt.Color('Container:N'),
+                            opacity=alt.condition(selection, alt.value(1), alt.value(0.2)),
+                            tooltip=['Time', 'Container', 'Memory GB']
+                        ).add_params(
+                            selection
+                        ).properties(
+                            height=300,
+                            title="Container Memory Usage Over Time"
+                        ).interactive()
+                        
+                        st.altair_chart(mem_chart, use_container_width=True)
+
                     # Historical Data Table
                     st.write("**Full History Log**")
                     st.dataframe(df_docker, use_container_width=True)
